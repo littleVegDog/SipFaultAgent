@@ -1,0 +1,39 @@
+# IDE
+.idea/
+.vscode/
+
+# Claude
+.claude/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Models & data (too large)
+model_files/
+knowledge_base/
+raw_rfcs/
+
+# ChromaDB / vector cache
+chroma_db/
+kb_store/
+
+# Logs
+logs/
+
+# Backup files
+backup-*.txt
+*-backup.txt
+BACKUP-*.txt
+
+# Temp files
+temp_kb_import/
+temp_test_output/
+review-chatgpt.txt
+
+# Environment
+.env
+
+# Suggestion/temp docs
+suggestion.pdf
+rfc-3gpp.md

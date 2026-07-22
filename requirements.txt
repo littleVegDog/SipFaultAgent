@@ -1,0 +1,13 @@
+openai>=1.0.0
+sentence-transformers
+numpy
+pyyaml
+chromadb
+torch
+transformers
+docling
+PyMuPDF
+beautifulsoup4
+markdownify
+psutil
+requests
