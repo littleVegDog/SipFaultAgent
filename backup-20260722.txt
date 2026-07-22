@@ -1,0 +1,3585 @@
+Project Backup - 2026-07-22 17:22:26
+==================================================
+
+
+============================================================
+文件: agent.py
+============================================================
+import json
+import re
+from openai import OpenAI
+from tools import SIPDiagnosticTools
+from rag import SbcRAG
+from prompts import SYSTEM_PROMPT
+from logger_config import user_print, info_print, debug_print, error_print, warn_print
+
+class SipFaultDiagAgent:
+    def __init__(self, llm_client:OpenAI, tools:SIPDiagnosticTools, rag: SbcRAG, LLM_MODEL_ID,
+                 input_enhancer=None):
+        self.llm_client = llm_client
+        self.tools = tools
+        self.rag = rag
+        self.memory = []
+        self.model_id = LLM_MODEL_ID
+        self.input_enhancer = input_enhancer
+
+    def _call_llm(self)->dict:
+        response= self.llm_client.chat.completions.create(
+            model=self.model_id,
+            messages=self.memory,
+            temperature=0.2,
+            response_format = {"type":"json_object"}  # ✅ 添加 JSON 格式约束
+        )
+        raw = response.choices[0].message.content
+        debug_print(f"LLM原始响应: {raw}")  # 使用调试日志
+        try:
+            return json.loads(raw)
+        except json.decoder.JSONDecodeError as e:
+            error_print(f"JSON解析失败，原始内容: {raw}")
+            # 如果使用了 response_format 但仍然失败，这是一个严重错误
+            return {"action": "final_answer", "conclusion": "LLM 响应格式错误，无法继续推理。", "sources": []}
+
+    def _execute_tool(self, tool_name:str, tool_input)->str:
+        if tool_name == "rag_search":
+            # tool_input 可以是字符串或字典
+            if isinstance(tool_input, str):
+                query = tool_input
+                filter_meta = None
+                top_k = 3
+            else:
+                query = tool_input.get("query", "")
+                filter_meta = tool_input.get("filter")
+                top_k = tool_input.get("top_k", 3)
+
+            docs = self.rag.search(
+                    query=query,
+                    top_k=top_k,
+                    filter_meta=filter_meta,
+                    input_enhancer=self.input_enhancer
+                )
+
+            return "\n".join(f"[{doc.id}] {doc.text}" for doc in docs)
+
+        return f"未知工具 {tool_name}"
+
+    def run(self, enhance_query:str, keywords: list = None):
+        self.memory = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": enhance_query}
+        ]
+        # 如果有关键词，可以在记忆的第一条用户消息中附带提示
+        if keywords:
+            self.memory.append({
+                "role": "user",
+                "content": f"注意：以下英文关键词可能有助于检索知识库：{', '.join(keywords)}"
+            })
+
+        info_print("开始故障定界推理...")
+
+        step = 0
+        while True:
+            step += 1
+            debug_print(f"第 {step} 步推理")
+            response  = self._call_llm()
+
+            if response.get("action") == "final_answer":
+                if response.get("响应格式错误"):
+                    # 向记忆中添加一条提示，要求 LLM 重新输出
+                    self.memory.append({
+                        "role": "user",
+                        "content": "你上次输出的格式非法，请重新输出，只包含一个 JSON 对象，不要任何解释。"
+                    })
+                    continue
+                else:
+                    info_print("思考结果：已定位故障，准备输出结论")
+            else:
+                info_print(f"思考结果：调用工具 {response['tool']}，输入: {response.get('input')}")
+
+            if response.get("action") == "final_answer":
+                conclusion = response["conclusion"]
+                sources = response.get("sources", [])
+                info_print("最终结论已生成")
+                return conclusion, sources
+
+            tool_name = response["tool"]
+            tool_input = response["input"]
+
+            if isinstance(tool_input, str) and tool_input.strip().startswith("{"):
+                try:
+                    tool_input = json.loads(tool_input)
+                except json.JSONDecodeError:
+                    pass  # 解析失败保持原字符串
+
+            debug_print(f"调用工具: {tool_name}")
+            result = self._execute_tool(tool_name, tool_input)
+            # 可视化观察
+            debug_print(f"工具返回: {result[:200]}{'...' if len(result) > 200 else ''}")
+
+
+            #当前行动与结果添加到上下文中
+            self.memory.append({
+                "role": "assistant",
+                "content": f"使用工具{tool_name}，输入{json.dumps(tool_input)}"
+            })
+            self.memory.append({
+                "role": "tool",       # ✅ 修复：工具返回应该使用 "tool" 角色
+                "content": f"工具结果：{result}"
+            })
+
+
+
+
+
+
+
+
+
+
+
+============================================================
+文件: backup_files.py
+============================================================
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Python脚本用于备份项目中的所有Python和Markdown文件
+生成一个包含所有文件内容的文本文件，使用UTF-8编码
+"""
+
+import os
+import glob
+from datetime import datetime
+
+def backup_files():
+    # 获取当前工作目录
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 生成带日期的文件名
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    output_file = f"{current_date}-project_backup.txt"
+
+    print(f"正在备份项目文件...")
+    print(f"项目目录: {project_dir}")
+    print(f"输出文件: {output_file}")
+
+    # 打开输出文件，使用UTF-8编码
+    with open(output_file, 'w', encoding='utf-8') as f:
+        # 添加文件头
+        f.write(f"Project Backup - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 50 + "\n\n")
+
+        # 处理Python文件
+        python_files = glob.glob(os.path.join(project_dir, "*.py"))
+        print(f"找到 {len(python_files)} 个Python文件")
+
+        for py_file in python_files:
+            filename = os.path.basename(py_file)
+            print(f"正在处理: {filename}")
+
+            # 添加文件分隔符
+            f.write("\n" + "=" * 60 + "\n")
+            f.write(f"文件: {filename}\n")
+            f.write("=" * 60 + "\n")
+
+            # 读取并写入文件内容
+            try:
+                with open(py_file, 'r', encoding='utf-8') as source_file:
+                    content = source_file.read()
+                    f.write(content)
+            except Exception as e:
+                f.write(f"读取文件时出错: {e}\n")
+
+            f.write("\n\n")
+
+        # 处理Markdown文件
+        md_files = glob.glob(os.path.join(project_dir, "*.md"))
+        print(f"找到 {len(md_files)} 个Markdown文件")
+
+        for md_file in md_files:
+            filename = os.path.basename(md_file)
+            print(f"正在处理: {filename}")
+
+            # 添加文件分隔符
+            f.write("\n" + "=" * 60 + "\n")
+            f.write(f"文件: {filename}\n")
+            f.write("=" * 60 + "\n")
+
+            # 读取并写入文件内容
+            try:
+                with open(md_file, 'r', encoding='utf-8') as source_file:
+                    content = source_file.read()
+                    f.write(content)
+            except Exception as e:
+                f.write(f"读取文件时出错: {e}\n")
+
+            f.write("\n\n")
+
+    print(f"\n备份完成！文件已保存为: {output_file}")
+
+if __name__ == "__main__":
+    backup_files()
+
+
+============================================================
+文件: chunker.py
+============================================================
+"""
+文档Chunker基类和RFC专用Chunker实现
+用于实现不同文档类型定制化切分策略
+"""
+
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any
+from dataclasses import dataclass
+import re
+import json
+from logger_config import info_print, debug_print, error_print
+
+@dataclass
+class Chunk:
+    """chunk数据结构"""
+    id: str
+    content: str
+    metadata: Dict[str, Any]
+    source_type: str
+
+class BaseChunker(ABC):
+    """Chunker基类"""
+
+    def __init__(self, **kwargs):
+        self.config = kwargs
+
+    @abstractmethod
+    def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        """抽象方法：实现具体chunk逻辑"""
+        pass
+
+    def validate_chunk(self, chunk: Chunk) -> bool:
+        """通用chunk验证"""
+        return (chunk.content and
+                len(chunk.content.strip()) > 10 and
+                chunk.id and
+                chunk.metadata is not None)
+
+    def post_process(self, chunks: List[Chunk]) -> List[Chunk]:
+        """通用后处理"""
+        # 去重，过滤等
+        return [chunk for chunk in chunks if self.validate_chunk(chunk)]
+
+class RFCChunker(BaseChunker):
+    """RFC文档专用Chunker"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # RFC章节匹配模式 - 严格匹配数字.数字 或 字母 开头后跟标题
+        # 为了适应 RFC 格式变体，放宽判定但仍然要求严格匹配
+        self.section_pattern = r'^(\d+(?:\.\d+)*|[A-Z])(?:\s+)(.+)$'  # 新的模式，支持一个或多个空格
+
+    def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        """
+        RFC文档专用切分逻辑
+        保持协议术语和章节结构的完整性
+        """
+        chunks = []
+        debug_print(f"开始处理RFC内容，长度={len(content)}")
+
+        try:
+            # RFC结构拆分
+            sections = self._extract_sections(content)
+            debug_print(f"提取到 {len(sections)} 个章节")
+
+            for i, section in enumerate(sections):
+                section_id = section['id']
+                section_title = section['title']
+                section_content = section['content']
+                line_start = section['line_start']
+                line_end = section['line_end']
+
+                # 添加主题标识
+                full_title = f"## {section_title} ({section_id})"
+
+                # 按照章节大小进行不同处理
+                if len(section_content) > 1000:
+                    # 大章节：进行细粒度切片，确保功能点完整性和语义完整性
+                    debug_print(f"处理大章节 {section_id}，长度: {len(section_content)}")
+                    sub_chunks = self._chunk_large_section(section_content, section_id,
+                                                         section_title, metadata)
+                    chunks.extend(sub_chunks)
+                else:
+                    # 小章节：直接保留完整内容
+                    debug_print(f"处理小章节 {section_id}，长度: {len(section_content)}")
+                    chunk_content = f"{full_title}\n\n{section_content}"
+                    chunks.append(Chunk(
+                        id=f"{section_id}",
+                        content=chunk_content,
+                        metadata={**metadata,
+                                'section_id': section_id,
+                                'title': section_title,
+                                'line_start': line_start,
+                                'line_end': line_end,
+                                'type': 'rfc_section'},
+                        source_type='rfc'
+                    ))
+
+            # 后处理
+            result_chunks = self.post_process(chunks)
+            debug_print(f"RFC处理完成，返回 {len(result_chunks)} 个chunk")
+            return result_chunks
+
+        except Exception as e:
+            error_print(f"RFC切分失败: {e}")
+            import traceback
+            traceback.print_exc()
+            # 出错时使用基础切分作为保底
+            return self._fallback_chunk(content, metadata)
+
+    def _extract_sections(self, text: str) -> List[Dict]:
+        """
+        提取RFC结构章节信息
+        修正了真实RFC格式的处理
+        """
+        sections = []
+        lines = text.split('\n')
+
+        current_section = None
+        current_content = []
+        debug_print(f"开始提取章节，总行数: {len(lines)}")
+
+        for line_num, line in enumerate(lines):
+            # 匹配章节标题行 - RFC常用格式
+            # 支持格式:
+            # "1. Introduction"
+            # "21.4.2 401 Unauthorized"
+            # "403 Forbidden"
+            section_match = re.match(self.section_pattern, line.strip())
+
+            if section_match:
+                debug_print(f"匹配到章节标题: \"{line.strip()}\" -> {section_match.groups()}")
+                # 保存前一个章节
+                if current_section:
+                    sections.append({
+                        'id': current_section['id'],
+                        'title': current_section['title'],
+                        'content': '\n'.join(current_content).strip(),
+                        'line_start': current_section['line_start'],
+                        'line_end': line_num - 1
+                    })
+
+                # 开始新章节
+                section_id = section_match.group(1).strip()
+                title = section_match.group(2).strip()
+                current_section = {
+                    'id': section_id,
+                    'title': title,
+                    'line_start': line_num
+                }
+                current_content = [line]  # 包含章节标题行
+            else:
+                # 非章节标题行：加入当前章节内容（保留非空行）
+                # 不应该排除所有空行，要区分内容行与空行
+                if current_section and line != "":
+                    current_content.append(line)
+
+        # 处理最后一个章节
+        if current_section:
+            sections.append({
+                'id': current_section['id'],
+                'title': current_section['title'],
+                'content': '\n'.join(current_content).strip(),
+                'line_start': current_section['line_start'],
+                'line_end': len(lines) - 1
+            })
+
+        debug_print(f"成功提取 {len(sections)} 个章节")
+        return sections
+
+    def _chunk_large_section(self, content: str, section_id: str,
+                           section_title: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        """处理大章节的子切片"""
+        chunks = []
+        debug_print(f"开始大章节切分: {section_id}")
+
+        # 按段落切分，保持内容连贯性
+        paragraphs = content.split('\n\n')
+
+        current_chunk = ""
+        chunk_id = 0
+
+        # 开始循环段落
+        for para in paragraphs:
+            if para.strip():
+                # 检查是否可以在当前chunk里添加这个段落
+                if len(current_chunk) + len(para) + 2 > 700:  # 700字符限制
+                    if current_chunk.strip():
+                        # 保存当前chunk
+                        chunk_content = f"### {section_title} ({section_id})\n\n{current_chunk.strip()}"
+                        chunks.append(Chunk(
+                            id=f"{section_id}_sub_{chunk_id}",
+                            content=chunk_content,
+                            metadata={**metadata,
+                                    'section_id': section_id,
+                                    'sub_section_id': f"{section_id}_sub_{chunk_id}",
+                                    'title': section_title,
+                                    'type': 'rfc_subsection'},
+                            source_type='rfc'
+                        ))
+                        chunk_id += 1
+                        current_chunk = para + "\n\n"  # 开始新chunk
+                    else:
+                        # 当前块为空，直接用新段落
+                        current_chunk = para + "\n\n"
+                else:
+                    current_chunk += para + "\n\n"
+
+        # 处理剩余内容
+        if current_chunk.strip():
+            chunk_content = f"### {section_title} ({section_id})\n\n{current_chunk.strip()}"
+            chunks.append(Chunk(
+                id=f"{section_id}_sub_{chunk_id}",
+                content=chunk_content,
+                metadata={**metadata,
+                        'section_id': section_id,
+                        'sub_section_id': f"{section_id}_sub_{chunk_id}",
+                        'title': section_title,
+                        'type': 'rfc_subsection'},
+                source_type='rfc'
+            ))
+
+        return chunks
+
+    def _fallback_chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        """错误时的回退切分方案"""
+        # 基础滑动窗口，先做最小保障
+        try:
+            from document_loader import chunk_text
+            basic_chunks = chunk_text(content, chunk_size=500, overlap=50)
+            return [Chunk(
+                id=f"fallback_chunk_{i}",
+                content=chunk,
+                metadata={**metadata, 'type': 'fallback_chunk', 'source': 'rfc'},
+                source_type='rfc'
+            ) for i, chunk in enumerate(basic_chunks)]
+        except Exception as e:
+            # 最后保障：返回整体文档
+            error_print(f"回退切分失败: {e}")
+            return [Chunk(
+                id=f"fallback_full",
+                content=content,
+                metadata={**metadata, 'type': 'fallback_full', 'source': 'rfc'},
+                source_type='rfc'
+            )]
+
+class GPPChunker(BaseChunker):
+    """3GPP文档专用Chunker"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # 3GPP章节模式匹配
+        self.section_pattern = r'^(\d+(?:\.\d+)*[A-Z]?(?:\.\d+)*)(?:\s{2,})(.+?)(?=\n\d+(?:\.\d+)*[A-Z]?(?:\.\d+)*\s{2,}|\Z)'
+
+    def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        """
+        3GPP文档专用切分逻辑
+        保持3GPP标准的结构完整性和语义连贯性
+        """
+        chunks = []
+        debug_print(f"开始处理3GPP内容，长度={len(content)}")
+
+        try:
+            # 3GPP结构拆分 - 与RFC类似，但适应3GPP特定格式
+            sections = self._extract_3gpp_sections(content)
+            debug_print(f"提取到 {len(sections)} 个章节")
+
+            for i, section in enumerate(sections):
+                section_id = section['id']
+                section_title = section['title']
+                section_content = section['content']
+
+                # 处理章节内容，保留原始的3GPP格式
+                if len(section_content) > 1500:  # 长章节进行细粒度切分
+                    debug_print(f"处理长章节 {section_id}，长度: {len(section_content)}")
+                    sub_chunks = self._chunk_large_3gpp_section(section_content, section_id,
+                                                              section_title, metadata)
+                    chunks.extend(sub_chunks)
+                else:
+                    # 小章节直接处理，保留标题信息
+                    debug_print(f"处理小章节 {section_id}，长度: {len(section_content)}")
+                    # 保持3GPP特有的格式，如标题后添加内容
+                    chunk_content = f"### {section_title} ({section_id})\n\n{section_content}"
+                    chunks.append(Chunk(
+                        id=f"{section_id}",
+                        content=chunk_content,
+                        metadata={**metadata,
+                                'section_id': section_id,
+                                'title': section_title,
+                                'type': '3gpp_section'},
+                        source_type='3gpp'
+                    ))
+
+            # 后处理
+            result_chunks = self.post_process(chunks)
+            debug_print(f"3GPP处理完成，返回 {len(result_chunks)} 个chunk")
+            return result_chunks
+
+        except Exception as e:
+            error_print(f"3GPP切分失败: {e}")
+            import traceback
+            traceback.print_exc()
+            # 出错时使用基础切分作为保底
+            return self._fallback_chunk(content, metadata)
+
+    def _extract_3gpp_sections(self, text: str) -> List[Dict]:
+        """
+        提取3GPP结构章节信息
+        """
+        sections = []
+        lines = text.split('\n')
+
+        current_section = None
+        current_content = []
+        debug_print(f"开始提取3GPP章节，总行数: {len(lines)}")
+
+        for line_num, line in enumerate(lines):
+            # 匹配3GPP章节标题行 - 支持多种3GPP格式
+            # 如: "1. Introduction", "3.2.1 Title", "5A.2 Title"等
+            section_match = re.match(self.section_pattern, line.strip(), re.MULTILINE | re.DOTALL)
+
+            if section_match and len(line.strip()) > 10:
+                debug_print(f"匹配到3GPP章节标题: \"{line.strip()}\" -> {section_match.groups()}")
+                # 保存前一个章节
+                if current_section:
+                    sections.append({
+                        'id': current_section['id'],
+                        'title': current_section['title'],
+                        'content': '\n'.join(current_content).strip(),
+                    })
+
+                # 开始新章节
+                section_id = section_match.group(1).strip()
+                title = section_match.group(2).strip()
+                current_section = {
+                    'id': section_id,
+                    'title': title
+                }
+                current_content = [line]  # 包含章节标题行
+            else:
+                # 非章节行，归属当前章节
+                if current_section:
+                    current_content.append(line)
+
+        # 处理最后一个章节
+        if current_section:
+            sections.append({
+                'id': current_section['id'],
+                'title': current_section['title'],
+                'content': '\n'.join(current_content).strip(),
+            })
+
+        debug_print(f"成功提取 {len(sections)} 个3GPP章节")
+        return sections
+
+    def _chunk_large_3gpp_section(self, content: str, section_id: str,
+                                section_title: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        """
+        处理大3GPP章节的子切片
+        针对3GPP文档特性的细粒度分段
+        """
+        chunks = []
+        debug_print(f"开始大3GPP章节切分: {section_id}")
+
+        # 按段落分割，但保持3GPP特有的结构元素
+        paragraphs = content.split('\n\n')
+
+        current_chunk = ""
+        chunk_id = 0
+
+        # 首先尝试按特定结构元素分割（如"Note:", "Important:", 等）
+        structured_paragraphs = []
+        for para in paragraphs:
+            if para.strip():
+                # 识别3GPP特定结构标记
+                if para.strip().startswith(('Note:', 'Important:', 'Caution:',
+                                          'Example:', 'Warning:', 'Note')):
+                    if current_chunk:
+                        structured_paragraphs.append(current_chunk)
+                        current_chunk = ""
+                    structured_paragraphs.append(para)
+                else:
+                    if current_chunk:
+                        current_chunk += "\n\n" + para
+                    else:
+                        current_chunk = para
+
+        # 处理剩余内容
+        if current_chunk:
+            structured_paragraphs.append(current_chunk)
+
+        # 然后按照长度进行最终切割
+        for para in structured_paragraphs:
+            if para.strip():
+                # 检查是否可以在当前chunk里添加这个段落
+                if len(current_chunk) + len(para) + 2 > 1000:  # 1000字符限制
+                    if current_chunk.strip():
+                        # 保存当前chunk
+                        chunk_content = f"### {section_title} ({section_id})\n\n{current_chunk.strip()}"
+                        chunks.append(Chunk(
+                            id=f"{section_id}_sub_{chunk_id}",
+                            content=chunk_content,
+                            metadata={**metadata,
+                                    'section_id': section_id,
+                                    'sub_section_id': f"{section_id}_sub_{chunk_id}",
+                                    'title': section_title,
+                                    'type': '3gpp_subsection'},
+                            source_type='3gpp'
+                        ))
+                        chunk_id += 1
+                        current_chunk = para + "\n\n"  # 开始新chunk
+                    else:
+                        # 当前块为空，直接用新段落
+                        current_chunk = para + "\n\n"
+                else:
+                    current_chunk += para + "\n\n"
+
+        # 处理剩余内容
+        if current_chunk.strip():
+            chunk_content = f"### {section_title} ({section_id})\n\n{current_chunk.strip()}"
+            chunks.append(Chunk(
+                id=f"{section_id}_sub_{chunk_id}",
+                content=chunk_content,
+                metadata={**metadata,
+                        'section_id': section_id,
+                        'sub_section_id': f"{section_id}_sub_{chunk_id}",
+                        'title': section_title,
+                        'type': '3gpp_subsection'},
+                source_type='3gpp'
+            ))
+
+        return chunks
+
+    def _fallback_chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        """错误时的回退切分方案"""
+        # 基础滑动窗口，先做最小保障
+        try:
+            from document_loader import chunk_text
+            basic_chunks = chunk_text(content, chunk_size=500, overlap=50)
+            return [Chunk(
+                id=f"fallback_chunk_{i}",
+                content=chunk,
+                metadata={**metadata, 'type': 'fallback_chunk', 'source': '3gpp'},
+                source_type='3gpp'
+            ) for i, chunk in enumerate(basic_chunks)]
+        except Exception as e:
+            # 最后保障：返回整体文档
+            error_print(f"3GPP回退切分失败: {e}")
+            return [Chunk(
+                id=f"fallback_full",
+                content=content,
+                metadata={**metadata, 'type': 'fallback_full', 'source': '3gpp'},
+                source_type='3gpp'
+            )]
+
+# 测试函数，可直接运行
+def test_rfc_chunker():
+    """测试RFC chunker"""
+    test_content = """1. Introduction
+
+This document defines the Session Initiation Protocol (SIP) for initiating, modifying, and terminating sessions between two or more participants in a multimedia conference, including voice, video, and messaging.
+
+2. Conformance
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+
+21.4.2 401 Unauthorized
+
+The 401 response indicates that the request requires user authentication. The response MUST include a WWW-Authenticate header field containing a challenge applicable to the requested resource.
+
+403 Forbidden
+
+The 403 response indicates that the server understood the request but refuses to fulfill it. The server SHOULD include a message body that explains why the request was refused.
+
+4. Protocol Overview
+
+The SIP protocol is a text-based protocol for session establishment."""
+
+    meta = {'title': 'RFC3261', 'type': 'rfc', 'version': '1.0'}
+
+    print("测试RFC Charmer:")
+    chunker = RFCChunker()
+    chunks = chunker.chunk(test_content, meta)
+
+    print(f"生成 {len(chunks)} 个chunks")
+    for i, chunk in enumerate(chunks):
+        print(f"Chunk {i+1}: {chunk.id}")
+        print(f"  内容长度: {len(chunk.content)}")
+        print(f"  内容预览: {chunk.content[:100]}...")
+        print(f"  元数据: {chunk.metadata}")
+        print()
+
+    return chunks
+
+def test_3gpp_chunker():
+    """测试3GPP chunker"""
+    test_content = """1. Introduction
+
+This is the introduction section of a 3GPP specification document. It describes the overall purpose and scope of the specification.
+
+2. Conformance
+
+The terms "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" are to be interpreted as described in RFC 2119.
+
+3. Architecture
+
+The architecture of the 3GPP system consists of several components including:
+- Core Network Elements
+- User Equipment (UE)
+- Access Network Elements
+
+Note: The architecture may vary depending on the specific 3GPP release and deployment scenario.
+
+3.1. Network Components
+
+The 3GPP network components include the following:
+- MME (Mobility Management Entity)
+- S-GW (Serving Gateway)
+- P-GW (Packet Data Network Gateway)
+
+Important: The exact implementation of these components is defined in the relevant 3GPP technical specifications.
+
+4. Protocol Description
+
+This section describes the protocols used in the 3GPP system. The protocols are designed to support:
+- Voice over IP (VoIP)
+- Video streaming
+- Messaging services
+
+Example: An example of a typical signaling message flow is shown in Figure 1."""
+
+    meta = {'title': 'TS 29.212', 'type': '3gpp', 'version': '1.0'}
+
+    print("测试3GPP Chunker:")
+    chunker = GPPChunker()
+    chunks = chunker.chunk(test_content, meta)
+
+    print(f"生成 {len(chunks)} 个chunks")
+    for i, chunk in enumerate(chunks):
+        print(f"Chunk {i+1}: {chunk.id}")
+        print(f"  内容长度: {len(chunk.content)}")
+        print(f"  内容预览: {chunk.content[:150]}...")
+        print(f"  元数据: {chunk.metadata}")
+        print()
+
+if __name__ == "__main__":
+    test_rfc_chunker()
+    test_3gpp_chunker()
+
+
+============================================================
+文件: config.py
+============================================================
+import os
+
+# Tavily API 配置
+TAVILY_API_KEY=os.getenv("TAVILY_API_KEY", "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")
+
+# serpapi API 配置 https://serpapi.com/manage-api-key
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "ede64d311b63993ac6a0c549ea848118d6a32af1f399d1061813847ff1a20dcc")
+
+# 大语言模型 API 配置（选择其中一种）
+# 选项一：AIHubmix
+#LLM_API_KEY="sk-f71c5c9e32594012a54cf23bf2e396b8"
+#LLM_BASE_URL="https://aihubmix.com/v1/"
+#LLM_MODEL_ID="gpt-4o-free"
+#LLM_TIMEOUT = "300"
+
+# 选项二：Modelscope
+#LLM_API_KEY="ms-33e39604-f598-425d-9725-04f278a98424"
+#LLM_BASE_URL="https://api-inference.modelscope.cn/v1/"
+#LLM_MODEL_ID="Qwen/Qwen3-8B"
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+#deepseel官方
+LLM_API_KEY=os.getenv("LLM_API_KEY", "sk-f71c5c9e32594012a54cf23bf2e396b8")
+LLM_BASE_URL=os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
+LLM_MODEL_ID=os.getenv("LLM_MODEL_ID", "deepseek-v4-pro")
+#选项三：内部的模型使
+#LLM_BASE_URL= "http://api.openai.rnd.huawei.com/v1"
+#LLM_API_KEY= "sk-1234"
+#LLM_MODEL_ID = "qwen3-8b"
+
+INPUT_ENHANCER_MODEL = "deepseek-v4-pro"
+
+
+#使用的EMBED模型
+KNOWLEDGE_BASE_DIR = "knowledge_base"
+#EMBED_MODEL = "all-MiniLM-L6-v2"    # 嵌入模型（本地）
+EMBED_MODEL = os.path.join(BASE_DIR, "model_files", "BAAI", "bge-m3")
+KB_CACHE_DIR = "chroma_db"
+
+# Rerank 模型
+RERANKER_MODEL = os.path.join(BASE_DIR, "model_files", "BAAI", "bge-reranker-base")
+
+
+============================================================
+文件: document_loader.py
+============================================================
+import os
+import re
+import yaml
+import logging
+from typing import List
+from dataclasses import dataclass
+from chunker import RFCChunker
+
+
+# ==================== 新增：数据清洗相关常量和函数 ====================
+
+# 切分后需要丢弃的无意义章节名（小写匹配）
+MEANINGLESS_SECTIONS = {
+    'acknowledgements', 'authors', 'author', 'appendix',
+    'table of contents', 'contributors', 'references',
+    'revision history', 'intellectual property', 'legal notice',
+    'introduction',   # 部分 RFC 的 Introduction 章节内容极短，仅有概述
+}
+
+# 各文档类型的 chunk 最小长度阈值（单位：字符）
+# case 类型阈值较低，因为 ## 现象/## 原因 等小节本身就短小精炼
+_MIN_CHUNK_LENGTHS = {
+    'case': 40,
+    'rfc': 80,
+    '3gpp': 80,
+    'product_doc': 60,
+    'community': 50,
+    'default': 80,
+}
+
+# 噪音正则模式（匹配页眉页脚、联系信息等无意义行）
+_NOISE_PATTERNS = [
+    # RFC 页眉行：RFC 3261 ...
+    (r'^\s*RFC\s+\d+.*?\n', ''),
+    # 地址行：门牌号 街道 城市 邮编
+    (r'^\d+\s+[A-Z][a-zA-Z\s,]+,\s*[A-Z]{2}\s+\d{5}.*\n', ''),
+    # 邮箱行
+    (r'^\s*EMail:\s*\S+@\S+\s*\n', ''),
+    # 电话/传真行
+    (r'^\s*(?:Phone|Fax):\s*[\d\-\+\(\)\s]+\s*\n', ''),
+    # 版权行
+    (r'^\s*Copyright.*?(?:RFC|Internet\s+Society).*\n', ''),
+    # RFC 状态说明行
+    (r'^\s*Status of this Memo\s*\n', ''),
+    # 独立行号行（数字单独一行）
+    (r'^\s*\d+\s*$\n', ''),
+]
+
+
+def is_meaningless_chunk(text: str, meta: dict) -> bool:
+    """
+    判断切分后的 chunk 是否无意义、应予丢弃。
+
+    丢弃条件（满足任一即丢弃）：
+    1. 文本过短（<80字符）
+    2. 属于已知无意义章节名
+    3. 匹配噪音模式（地址/邮箱/页眉等）
+    4. 正文字符占比过低（<30%为字母/数字）
+    """
+    if not text or not text.strip():
+        return True
+
+    text_stripped = text.strip()
+
+    # 条件1：过短（按文档类型差异化阈值）
+    doc_type = meta.get('type', 'default')
+    min_len = _MIN_CHUNK_LENGTHS.get(doc_type, _MIN_CHUNK_LENGTHS['default'])
+    if len(text_stripped) < min_len:
+        return True
+
+    # 条件2：章节名过滤
+    section_title = meta.get('section_title', '').lower()
+    if section_title in MEANINGLESS_SECTIONS:
+        return True
+
+    # 条件3：噪音模式匹配
+    for pattern, _ in _NOISE_PATTERNS:
+        if re.search(pattern, text_stripped):
+            return True
+
+    # 条件4：正文字符占比（排除符号、空格、数字-only）
+    # 但排除纯ASCII图（状态机图等），它们虽然符号多但有语义
+    alpha_digit_count = sum(c.isalnum() for c in text_stripped)
+    alpha_ratio = alpha_digit_count / max(len(text_stripped), 1)
+    # 阈值0.15：低于此判定为纯噪音（如表格分隔线、ASCII艺术家等）
+    if alpha_ratio < 0.15:
+        return True
+
+    return False
+
+
+def clean_chunk_text(text: str) -> str:
+    """
+    清理 chunk 文本中的残余噪音字符，保留正文结构。
+    """
+    lines = text.splitlines()
+    cleaned_lines = []
+
+    for line in lines:
+        # 跳过纯空白行（后续统一处理换行）
+        stripped = line.strip()
+        # 保留有实质内容的行（允许标点符号作为内容）
+        if stripped or len(cleaned_lines) == 0:
+            cleaned_lines.append(line.rstrip())
+
+    # 合并连续空行（不超过2个换行）
+    result = '\n'.join(cleaned_lines)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result.strip()
+
+
+@dataclass
+class RawDocument:
+    meta: dict
+    content: str
+
+def parse_markdown_with_yaml(file_path:str)->RawDocument:
+    with open(file_path, "r", encoding="utf-8") as f:
+        text = f.read()
+    #提取yaml头部---即markdown文件开头的元数据块，用于配置文档的属性
+    match = re.match(r'^---\s*\n(.*?)\n---\s*\n', text, re.DOTALL)
+    if match:
+        meta = yaml.safe_load(match.group(1))
+        content = text[match.end():]
+    else:
+        meta = {}
+        content = text
+    return RawDocument(meta = meta, content = content)
+
+def chunk_text(text:str, chunk_size = 300, overlap = 50)->List[str]:
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start += (chunk_size - overlap)
+    return chunks
+
+def extract_sections(text: str, doc_type: str = "") -> List[dict]:
+    """
+    从RFC等文档中提取结构化章节信息，用于Parent-Child结构
+
+    Args:
+        text: 原始文档文本
+        doc_type: 文档类型
+
+    Returns:
+        List[dict]: 包含章节信息的列表
+    """
+    sections = []
+
+    # RFC文档的章节提取 - 仅在调用RFC chunker时使用，这里提供备用接口
+    if doc_type == "rfc":
+        # 这里保留兼容性接口，但实际RAG流程中应该避免调用此函数
+        # 当前文献加载中的extract_sections和RFC Chunker是独立使用的
+        # 保持备份逻辑完整性
+        pass
+
+    # 非RFC文档使用默认处理
+    # 默认处理：将整个文档作为一个"章节"
+    sections.append({
+        'section_id': '0',
+        'title': '全文',
+        'content': text
+    })
+
+    return sections
+
+
+def semantic_chunk(text:str, meta:dict)->List[str]:
+    """
+    根据文档类型选择不同的切分策略。
+    meta 中应包含 'type' 字段，如 'rfc', 'product_doc', 'case', 'community'。
+
+    改进版本：对于RFC文件使用专门的chunker，其他类型使用默认策略
+    """
+    doc_type = meta.get("type", "")
+
+    # RFC文件使用专门的chunker进行协议结构化处理
+    if doc_type == "rfc":
+        # 使用RFCChunker进行RFC专用切分
+        rfc_chunker = RFCChunker()
+        try:
+            # 调用RFC专用chunker
+            raw_chunks = rfc_chunker.chunk(text, meta)
+            # 转换为原始字符串列表
+            return [chunk.content for chunk in raw_chunks]
+        except Exception as e:
+            logging.error(f"RFC chunker出错，使用默认方案: {e}")
+            # 回退到默认切分方式
+            return _semantic_chunk_old(text, meta)
+
+    # 其他文档类型使用默认策略
+    return _semantic_chunk_old(text, meta)
+
+def _semantic_chunk_old(text:str, meta:dict)->List[str]:
+    """
+    老版本的语义切分函数（保留原逻辑为回退）
+    """
+    doc_type = meta.get("type", "")
+
+    # 首先提取语义章节（Parent结构）
+    sections = extract_sections(text, doc_type)
+
+    if doc_type in ("case", "community"):
+        # 案例按二级标题切分，尽量保持完整
+        chunks = []
+        for section in sections:
+            # 对每个section内部再次细分
+            if len(section['content']) < 100:  # 过短章节直接返回
+                if section['content'].strip():
+                    chunks.append(f"## {section['title']}\n{section['content']}")
+            else:
+                # 针对较大章节进行细粒度分割
+                sub_chunks = chunk_text(section['content'], chunk_size=500, overlap=50)
+                for i, sub_chunk in enumerate(sub_chunks):
+                    # 确保子chunk也包含章节信息（Parent-Child）
+                    chunk_id = f"{section['section_id']}_sub_{i}"
+                    chunks.append(f"## {section['title']}\n{sub_chunk}")
+
+        # 清理和过滤
+        filtered_chunks = []
+        for chunk in chunks:
+            if is_meaningless_chunk(chunk, meta):
+                continue
+            chunk = clean_chunk_text(chunk)
+            if chunk and len(chunk) >= 30:
+                filtered_chunks.append(chunk)
+
+        return filtered_chunks if filtered_chunks else chunk_text(text)
+
+    # rfc文档切割，按照章节的小节编号切分（1. 1.1 21.4.4 A.）
+    if doc_type == "rfc":
+        chunks = []
+        for section in sections:
+            section_header = section['section_id']
+            content = section['content']
+
+            if not content.strip() or len(content) < 30:
+                continue
+
+            if len(content) > 700:
+                # 对大章节进行子分割，形成Parent-Child关系
+                sub_chunks = chunk_text(content, chunk_size=500, overlap=50)
+                for i, sub in enumerate(sub_chunks):
+                    chunk_id = f"{section_header}_child_{i}"
+                    # 构建带有Parent信息的chunk
+                    full_content = f"### 章节：{section['title']} ({section_header})\n{sub}"
+                    chunks.append(full_content)
+            else:
+                # 小章节，直接构建Document结构
+                full_content = f"### 章节：{section['title']} ({section_header})\n{content}"
+                chunks.append(full_content)
+
+        return _post_process_chunks(chunks if chunks else chunk_text(text), meta)
+
+    # 产品文档（错误码、配置说明）：按章节切分
+    if doc_type == "product_doc":
+        chunks = []
+        for section in sections:
+            content = section['content']
+            if not content.strip() or len(content) < 30:
+                continue
+
+            if len(content) > 600:
+                # 对大章节进行子分割
+                sub_chunks = chunk_text(content, chunk_size=500, overlap=50)
+                for i, sub in enumerate(sub_chunks):
+                    chunk_id = f"{section['section_id']}_child_{i}"
+                    full_content = f"## {section['title']}\n{sub}"
+                    chunks.append(full_content)
+            else:
+                # 小章节
+                full_content = f"## {section['title']}\n{content}"
+                chunks.append(full_content)
+
+        return _post_process_chunks(chunks if chunks else chunk_text(text), meta)
+
+    # 默认：固定滑动窗口
+    default_chunks = chunk_text(text)
+    return _post_process_chunks(default_chunks, meta)
+
+
+def _post_process_chunks(chunks: List[str], meta: dict) -> List[str]:
+    """
+    对切分结果统一执行：去噪、过滤、保底。
+    确保不返回空列表（至少保留一个 chunk）。
+    """
+    cleaned = []
+    for chunk in chunks:
+        if is_meaningless_chunk(chunk, meta):
+            continue
+        chunk = clean_chunk_text(chunk)
+        if chunk:  # 清洗后可能变空，再判一次
+            cleaned.append(chunk)
+
+    # 保底：所有 chunk 都被过滤时，保留原文（不过滤）
+    if not cleaned and chunks:
+        fallback = clean_chunk_text(chunks[0])
+        return [fallback] if fallback else []
+
+    return cleaned
+
+
+def load_all_md_documents(dir_path:str)->List[RawDocument]:
+    docs = []
+    for root, _, files in os.walk(dir_path):
+        for file in files:
+            if file.endswith(".md"):
+                file_path = os.path.join(root, file)
+                try:
+                    doc = parse_markdown_with_yaml(file_path)
+                    docs.append(doc)
+                except Exception as e:
+                    logging.error(f"解析失败 {file_path}：{e}")
+    return docs
+
+
+
+============================================================
+文件: eval_rag.py
+============================================================
+"""
+RAG 专项评估脚本
+测试内容：Recall@K、MRR@K、各优化项（Rerank / Query Expansion）的效果对比
+
+用法:
+    python eval_rag.py
+"""
+
+import time
+import json
+from openai import OpenAI
+from rag import build_knowledge_base
+from reranker import BGEReranker
+from input_enhancer import InputEnhancer
+from config import (
+    EMBED_MODEL, KNOWLEDGE_BASE_DIR, KB_CACHE_DIR,
+    RERANKER_MODEL, LLM_BASE_URL, LLM_API_KEY, INPUT_ENHANCER_MODEL
+)
+
+# -------- 测试集 --------
+# 每项: query + 相关文档的 id 列表（部分匹配即可）
+# 建议 15~20 条，覆盖注册/呼叫/认证/媒体等场景
+TEST_SET = [
+    {"query": "Cseq头域的定义", "doc_ids": ["rfc3261_8_1_1_5", "rfc3261_20_16", "rfc3261_12_2_1_1","rfc3261_25_1"]},
+    {"query": "重定向是什么", "doc_ids": ["rfc3261_8_3","rfc3261_13_3_1_2","rfc3261_21_3","rfc3261_25_1","rfc3261_8_1_3_4"]},
+    {"query": "REGISTER 401 未授权", "doc_ids": ["rfc3261_8_1_3_5","rfc3261_21_4_2", "rfc3261_22_2","rfc3261_22_3"]},
+    {"query": "SIP NOTIFY 方法的作用", "doc_ids": ["rfc6665_3_2","rfc6665_3_2_1","rfc6665_5_4_5","rfc6665_5_4_5","rfc6665_5_4_7","rfc6665_5_4_8","rfc6665_8_1_2"]},
+    {"query": "SIP BYE 消息格式", "doc_ids": ["rfc3261_12_3","rfc3261_15", "rfc3261_15_1_1","rfc3261_15_1_2","rfc3261_25_1"]},
+    {"query": "INVITE 请求超时", "doc_ids": ["rfc3261_13_2_2","rfc3261_8_1_3_1","rfc3261_12_2_1_2","rfc3261_21_4_9"]},
+    {"query": "PRACK 是什么协议", "doc_ids": ["rfc3262_1"]},
+    {"query": "SUBSCRIBE NOTIFY 机制", "doc_ids": ["rfc6665_1_1","rfc6665_3_1","rfc6665_3_2", "rfc6665_3_1","rfc6665_3_1_1",
+                                                   "rfc6665_3_1_2","rfc6665_3_1_3","rfc6665_3_2","rfc6665_3_2_1"]},
+    {"query": "SDP 媒体协商", "doc_ids": ["rfc3264_1"]},
+    {"query": "NAT 穿越 SIP", "doc_ids": []},
+    {"query": "486 BUSY HERE", "doc_ids": []},
+    {"query": "403 Forbidden 认证失败", "doc_ids": []},
+    {"query": "SIP 180 Ringing", "doc_ids": []},
+    {"query": "488 Not Acceptable Here", "doc_ids": []},
+    {"query": "ACK 消息作用", "doc_ids": []},
+    {"query": "CANCEL 请求", "doc_ids": []},
+    {"query": "REGISTER 刷新注册", "doc_ids": []},
+    {"query": "SIP 路由机制", "doc_ids": []},
+]
+
+
+def compute_recall_mrr(retrieved_docs, relevant_ids, k=5):
+    """计算单个 query 的 Recall@K 和 MRR@K"""
+    retrieved_ids = [d.id for d in retrieved_docs[:k]]
+    relevant_set = set(relevant_ids)
+
+    # Recall
+    hits = len(set(retrieved_ids) & relevant_set)
+    recall = hits / len(relevant_set) if relevant_set else 0.0
+
+    # MRR
+    mrr = 0.0
+    for i, doc_id in enumerate(retrieved_ids):
+        if doc_id in relevant_set:
+            mrr = 1.0 / (i + 1)
+            break
+
+    return recall, mrr
+
+
+def eval_config(kb, test_set, use_rerank, use_expansion, enhancer=None, top_k=5):
+    """
+    在一种配置下跑完整个测试集，返回指标均值。
+    use_rerank 通过 kb.enable_rerank 控制。
+    """
+    old_rerank = kb.enable_rerank
+    kb.enable_rerank = use_rerank
+
+    recalls, mrrs = [], []
+    latencies = []
+
+    for item in test_set:
+        query = item["query"]
+        relevant = item.get("doc_ids", [])
+
+        start = time.time()
+        docs = kb.search(
+            query=query,
+            top_k=top_k,
+            input_enhancer=enhancer if use_expansion else None
+        )
+        elapsed = time.time() - start
+        latencies.append(elapsed)
+
+        recall, mrr = compute_recall_mrr(docs, relevant, k=top_k)
+        recalls.append(recall)
+        mrrs.append(mrr)
+
+    kb.enable_rerank = old_rerank
+    return {
+        f"Recall@{top_k}": sum(recalls) / len(recalls),
+        f"MRR@{top_k}": sum(mrrs) / len(mrrs),
+        "AvgLatency(s)": sum(latencies) / len(latencies),
+    }
+
+
+def print_results(title, results):
+    print(f"\n{'='*50}")
+    print(f"  {title}")
+    print(f"{'='*50}")
+    for k, v in results.items():
+        print(f"  {k:<20}: {v:.4f}")
+
+
+def main():
+    print("初始化模型中（首次加载较慢）...")
+
+    # 初始化 reranker（传入 kb 之前就加载好）
+    reranker = BGEReranker(RERANKER_MODEL)
+
+    # 初始化 LLM client（query expansion 用）
+    llm_client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+    enhancer = InputEnhancer(llm_client, INPUT_ENHANCER_MODEL)
+
+    # 加载知识库（传入 reranker）
+    kb = build_knowledge_base(
+        KNOWLEDGE_BASE_DIR,
+        emb_model=EMBED_MODEL,
+        cache_dir=KB_CACHE_DIR,
+        reranker=reranker
+    )
+    print(f"知识库加载完成，共 {len(kb.documents)} 条文档\n")
+
+    top_k = 5
+    configs = [
+        {"title": "基线（无 rerank，无 expansion）",
+         "use_rerank": False, "use_expansion": False, "enhancer": None},
+
+        {"title": "+ Rerank",
+         "use_rerank": True, "use_expansion": False, "enhancer": None},
+
+        {"title": "+ Query Expansion",
+         "use_rerank": False, "use_expansion": True, "enhancer": enhancer},
+
+        {"title": "+ Rerank + Query Expansion（完整）",
+         "use_rerank": True, "use_expansion": True, "enhancer": enhancer},
+    ]
+
+    all_results = []
+    for cfg in configs:
+        r = eval_config(
+            kb, TEST_SET,
+            use_rerank=cfg["use_rerank"],
+            use_expansion=cfg["use_expansion"],
+            enhancer=cfg["enhancer"],
+            top_k=top_k
+        )
+        print_results(cfg["title"], r)
+        all_results.append((cfg["title"], r))
+
+    # 汇总对比
+    print(f"\n{'='*50}")
+    print("  优化效果对比（相对基线提升）")
+    print(f"{'='*50}")
+    baseline = all_results[0][1]
+    for title, r in all_results[1:]:
+        recall_delta = r["Recall@5"] - baseline["Recall@5"]
+        mrr_delta = r["MRR@5"] - baseline["MRR@5"]
+        print(f"  {title}")
+        print(f"    Recall@5 提升: {recall_delta:+.4f}")
+        print(f"    MRR@5 提升:    {mrr_delta:+.4f}")
+
+    # 打印延迟
+    print(f"\n{'='*50}")
+    print("  各配置延迟（秒）")
+    print(f"{'='*50}")
+    for title, r in all_results:
+        print(f"  {title:<45}: {r['AvgLatency(s)']:.3f}s")
+
+
+if __name__ == "__main__":
+    main()
+
+
+============================================================
+文件: logger_config.py
+============================================================
+import logging
+import sys
+import os
+
+def setup_logging():
+    """设置系统日志和用户日志配置"""
+
+    # 创建用户日志处理器 - 输出到stdout，用于前台显示
+    user_handler = logging.StreamHandler(sys.stdout)
+    user_handler.setLevel(logging.INFO)
+    user_formatter = logging.Formatter('%(message)s')
+    user_handler.setFormatter(user_formatter)
+
+    # 创建系统日志处理器 - 输出到文件，用于调试
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    system_handler = logging.FileHandler(os.path.join(log_dir, "system.log"))
+    system_handler.setLevel(logging.DEBUG)
+    system_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    system_handler.setFormatter(system_formatter)
+
+    # 配置根日志记录器
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+
+    # 添加处理器
+    root_logger.addHandler(user_handler)
+    root_logger.addHandler(system_handler)
+
+    # 创建专门的用户日志记录器
+    user_logger = logging.getLogger('user')
+    user_logger.addHandler(user_handler)
+    user_logger.propagate = False  # 防止重复输出
+
+    # 创建专门的系统日志记录器
+    system_logger = logging.getLogger('system')
+    system_logger.addHandler(system_handler)
+    system_logger.propagate = False
+
+    return user_logger, system_logger
+
+# 全局日志记录器
+user_logger, system_logger = setup_logging()
+
+# 便捷函数
+def user_print(*args, **kwargs):
+    """用户前台输出函数"""
+    print(*args, **kwargs)
+
+def debug_print(*args, **kwargs):
+    """调试输出函数"""
+    system_logger.debug(" ".join(str(arg) for arg in args))
+
+def info_print(*args, **kwargs):
+    """普通信息输出"""
+    system_logger.info(" ".join(str(arg) for arg in args))
+
+def error_print(*args, **kwargs):
+    """错误输出"""
+    system_logger.error(" ".join(str(arg) for arg in args))
+
+def warn_print(*args, **kwargs):
+    """警告输出"""
+    system_logger.warning(" ".join(str(arg) for arg in args))
+
+
+============================================================
+文件: main.py
+============================================================
+# main.py - 第一行
+import transformers.modeling_utils
+import torch
+from functools import partial
+
+# 强制所有 torch.load 默认使用 weights_only=False
+#_original_load = torch.load
+#torch.load = partial(_original_load, weights_only=False)
+# 若 transformers 内部使用了自己的 load 函数，也覆盖
+#if hasattr(transformers.modeling_utils, 'load_state_dict'):
+#    transformers.modeling_utils.load_state_dict = partial(
+#        transformers.modeling_utils.load_state_dict, weights_only=False
+#    )
+
+import os
+os.environ['NO_PROXY'] = 'api.openai.rnd.huawei.com'
+os.environ['no_proxy'] = 'api.openai.rnd.huawei.com'
+#os.environ["PT_WEIGHTS_ONLY_MODE"] = "0"    #解决PyTorch 2.6+的weights_only=True默认导致加载模型出错
+
+from openai import OpenAI
+from config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL_ID, BASE_DIR, KNOWLEDGE_BASE_DIR, EMBED_MODEL, INPUT_ENHANCER_MODEL, KB_CACHE_DIR, RERANKER_MODEL
+from input_enhancer import InputEnhancer
+from agent import SipFaultDiagAgent
+from router import RouterAgent
+from reranker import BGEReranker
+from tools import SIPDiagnosticTools
+from rag import build_knowledge_base, incremental_add, SbcRAG
+import ssl
+import json
+#ssl._create_default_https_context = ssl._create_unverified_context
+
+from logger_config import user_print, info_print, debug_print, error_print, warn_print
+#需要去openai库的_base_client.py里，搜索self._client = ，所有self._client实例化的地方都加上verify=False，一共有两处，都加一下就可以了
+#import urllib3
+
+#urllib3.disable_warnings()
+
+def main():
+    # 初始化管理功能
+    user_print("正在加载知识库...")
+    kb = None
+
+    # 首先尝试加载现有知识库
+    cached_kb = SbcRAG.load(KB_CACHE_DIR, EMBED_MODEL)
+    if cached_kb is not None:
+        kb = cached_kb
+        user_print("知识库加载成功")
+    else:
+        user_print("未找到现有知识库，需要全量构建")
+        # 设置 force_rebuild=True 以防默认加载逻辑被跳过
+        kb = build_knowledge_base(KNOWLEDGE_BASE_DIR, emb_model=EMBED_MODEL, cache_dir=KB_CACHE_DIR, force_rebuild=True)
+        kb.save(KB_CACHE_DIR)
+        user_print("知识库已重新构建并保存")
+
+    llm_client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+    reranker = BGEReranker(RERANKER_MODEL)
+    tools = SIPDiagnosticTools()
+    enhancer = InputEnhancer(llm_client, INPUT_ENHANCER_MODEL)
+    agent = SipFaultDiagAgent(llm_client, tools, kb, LLM_MODEL_ID, input_enhancer=enhancer)
+    router = RouterAgent()
+
+    while True:
+        user_print("\n" + "="*60)
+        user_print("SBC诊断助手菜单：")
+        user_print("1. 输入问题查询")
+        user_print("2. 删除文档")
+        user_print("3. 查看知识库文档数量")
+        user_print("4. 退出")
+        user_print("="*60)
+
+        choice = input("请选择操作: ").strip()
+
+        if choice == "1":
+            raw = input("\n请输入问题，(输入exit退出):")
+            if raw.lower() in ("exit", "quit"):
+                break
+
+            # 路由查询，判断是协议查询还是故障诊断
+            result = router.route_query(raw)
+            confidence = router.get_routing_confidence(raw)
+
+            info_print(f"路由判断 - 类型: {result}, 置信度: 协议={confidence['protocol']:.2f}, 故障诊断={confidence['diagnosis']:.2f}")
+
+            if result == "protocol_query":
+                user_print("正在处理协议查询...")
+                enhanced = enhancer.enhance(raw)
+                enhanced_query = enhanced.get("enhanced_query", raw)
+                user_print(f"处理查询: {enhanced_query}")
+
+                # 使用RAG系统处理协议查询（已封装到RAG模块中）
+                result = kb.protocol_query(enhanced_query, top_k=5, llm_client=llm_client, model_id=LLM_MODEL_ID)
+                user_print("\n=== 协议查询结果 ===")
+                user_print(result)
+            else:
+                user_print("故障agent根据问题思考中...\n")
+                enhanced = enhancer.enhance(raw)
+                enhanced_query = enhanced.get("enhanced_query", raw)
+                keywords = enhanced.get("keywords", [])
+                user_print(f"整理查询请求为:{enhanced}")
+
+                conclusion, sources = agent.run(enhanced_query, keywords=keywords)
+
+                user_print("\n=== 最终定位定界结论 ===")
+                user_print(conclusion)
+                if sources:
+                    user_print("\n=== 引用来源 ===")
+                    for src in sources:
+                        user_print(src)
+
+        elif choice == "2":
+            info_print("文档删除模式")
+            info_print("1. 按文档ID删除")
+            info_print("2. 按元数据条件删除")
+            del_choice = input("请选择删除方式: ")
+
+            if del_choice == "1":
+                doc_id = input("请输入要删除的文档ID: ").strip()
+                if doc_id:
+                    kb.delete_document(doc_id)
+                    kb.save(KB_CACHE_DIR)
+                    info_print("文档删除完成")
+                else:
+                    info_print("文档ID不能为空")
+            elif del_choice == "2":
+                info_print("请输入删除条件（例如：{'type': 'rfc'}）")
+                try:
+                    filter_str = input("删除条件JSON: ")
+                    filter_meta = json.loads(filter_str)
+                    deleted_count = kb.delete_documents_by_metadata(filter_meta)
+                    kb.save(KB_CACHE_DIR)
+                    info_print(f"成功删除 {deleted_count} 个文档")
+                except Exception as e:
+                    info_print(f"条件解析失败: {e}")
+
+        elif choice == "3":
+            info_print(f"当前知识库文档数量: {len(kb.documents)}")
+            info_print("Chroma数据库路径:", os.path.join(BASE_DIR, "chroma_db"))
+
+        elif choice == "4":
+            info_print("程序退出")
+            break
+        else:
+            info_print("无效选择")
+
+if __name__ == "__main__":
+    # 可选择启动模式：全量重建、增量添加、或直接运行
+    user_print("请选择启动模式：")
+    user_print("1. 直接运行（加载现有知识库）")
+    user_print("2. 全量重建知识库")
+    user_print("3. 增量添加文档")
+
+    choice = input("请输入选择 (1/2/3): ").strip()
+
+    if choice == "2":
+        user_print("正在全量重建知识库...")
+        kb = build_knowledge_base(KNOWLEDGE_BASE_DIR, emb_model=EMBED_MODEL, cache_dir=KB_CACHE_DIR, force_rebuild=True)
+        kb.save(KB_CACHE_DIR)
+        user_print("全量知识库重建完成！")
+    elif choice == "3":
+        new_dir = input("输入新文档目录: ").strip()
+        if new_dir:
+            incremental_add(new_dir, KB_CACHE_DIR, EMBED_MODEL)
+            user_print("增量添加完成！")
+        else:
+            user_print("未输入有效目录")
+    # 选择1时运行main()，默认启动模式
+
+    main()
+
+
+
+============================================================
+文件: prompts.py
+============================================================
+SYSTEM_PROMPT = """ 【重要】你只能输出一行纯 JSON，不要输出任何其他文字、解释、Markdown 标记或换行。
+如果你的回答包含非 JSON 内容，系统将崩溃。请严格遵守。
+
+你是一个协议知识查询专家。你拥有一组诊断工具和知识库。请逐步推理，每次只使用一个工具，然后根据观察结果决定下一步。最终给出结论并引用证据。
+
+可用工具：
+- rag_search(查询参数): 检索知识库。
+    可以是一个简单的查询字符串，或者一个包含以下字段的JSON对象：
+        - query: 查询问题（必填）
+        - keywords: 英文关键词列表，用于提高英文文档命中率（可选）
+        - filter: 按文档类型过滤(强烈建议使用)，可用类型：
+            {"type": "rfc"}          — 基础协议、请求方法、响应码定义
+            {"type": "3gpp"}         — 核心网业务流程、接口规范（如Gx、Gm）、策略控制
+            {"type": "product_doc"}  — 设备配置、错误码手册、产品特性说明
+            - top_k: 返回结果数量（可选，默认3）
+    例如：{"query":"注册失败原因","keywords":["403","REGISTER"],"filter":{"type":"rfc"}}
+
+你必须输出**纯 JSON**，不要附加任何解释文字，不要使用 Markdown 代码块:
+{"action":"tool", "tool":"xxx", "input":"xxx"}
+或
+{"action":"final_answer", "conclusion":"...", "sources":["..."]}"""
+
+PROTOCOL_QUERY_PROMPT = """
+你是一个专业的通信协议解释器，擅长解释SIP、RFC等协议规范。
+
+以下是用户查询 "{query}" 的相关协议文档内容，请基于这些内容为用户提供清晰、简洁的解释：
+
+{combined_content}
+
+请基于以上文档内容，使用中文为用户解释相关协议内容，不要过度推断，仅基于文档内容进行解释。
+请保持回答专业、准确且易于理解。
+"""
+
+
+============================================================
+文件: query_expander.py
+============================================================
+import json
+import re
+from typing import List, Dict, Optional
+from openai import OpenAI
+from logger_config import user_print, info_print, debug_print, error_print, warn_print
+
+class QueryExpander:
+    """Query Expansion 查询增强器"""
+
+    # 预定义的协议关键词 -> 扩展映射规则（涵盖核心SIP协议相关）
+    PROTOCOL_RULES = {
+        # 常见错误码扩展
+        "403": ["Forbidden", "SIP response code 403", "authentication failure", "access denied"],
+        "401": ["Unauthorized", "SIP response code 401", "auth failed", "unauthorized"],
+        "404": ["Not Found", "SIP response code 404", "user not found", "not exists"],
+        "200": ["OK", "SIP response code 200", "success", "confirmed"],
+        "400": ["Bad Request", "SIP response code 400", "malformed request"],
+        "486": ["Busy Here", "SIP response code 486", "user busy"],
+        "487": ["Request Terminated", "SIP response code 487", "call canceled"],
+        "500": ["Server Internal Error", "SIP response code 500", "server error"],
+        "503": ["Service Unavailable", "SIP response code 503", "service unavailable"],
+
+        # 核心协议方法
+        "invite": ["INVITE request", "SIP INVITE method", "call setup", "session initiation"],
+        "register": ["REGISTER request", "SIP REGISTER method", "registration", "user registration"],
+        "subscribe": ["SUBSCRIBE request", "SIP SUBSCRIBE method", "subscription", "event subscription"],
+        "notify": ["NOTIFY request", "SIP NOTIFY method", "notification", "event notification"],
+        "options": ["OPTIONS request", "SIP OPTIONS method", "options", "server capabilities"],
+        "bye": ["BYE request", "SIP BYE method", "call end", "session termination"],
+        "cancel": ["CANCEL request", "SIP CANCEL method", "call cancel", "request cancelation"],
+        "message": ["MESSAGE request", "SIP MESSAGE method", "instant message", "text message"],
+        "info": ["INFO request", "SIP INFO method", "information", "session info"],
+        "prack": ["PRACK request", "SIP PRACK method", "provisional response ACK"],
+
+        # 协议相关术语
+        "sip": ["SIP protocol", "Session Initiation Protocol", "session protocol", "voice protocol"],
+        "rfc": ["RFC specification", "Request for Comments", "protocol specification", "RFC standard"],
+        "sbc": ["SBC", "Session Border Controller", "session border control", "media gateway"],
+        "ims": ["IMS", "IP Multimedia Subsystem", "IP multimedia framework"],
+        "pdu": ["PDU", "Protocol Data Unit", "data unit", "message unit"],
+        "tftp": ["TFTP", "Trivial File Transfer Protocol", "file transfer"],
+        "rtp": ["RTP", "Real-time Transport Protocol", "media streaming", "voice streaming"],
+        "rtcp": ["RTCP", "Real-time Transport Control Protocol", "media control"],
+        "dtmf": ["DTMF", "Dual-Tone Multi-Frequency", "dial tone", "dialing signal"],
+        "codec": ["Codec", "Codec format", "audio codec", "video codec"],
+        "session": ["Session", "Call session", "media session", "voice session"],
+
+        # 核心业务词条
+        "register": ["registration", "user registration", "sip registration", "line registration"],
+        "authentication": ["authentication", "auth", "user authentication", "access control"],
+        "authorization": ["authorization", "authz", "access rights", "permission"],
+        "call": ["call", "session", "voice call", "telephone call"],
+        "invite": ["invite", "call setup", "session invitation", "establish call"],
+        "media": ["media", "audio", "voice", "video", "streaming"],
+        "gateway": ["gateway", "media gateway", "session border controller", "sip gateway"],
+        "trunk": ["trunk", "signaling trunk", "media trunk", "voice trunk"],
+        "user": ["user", "subscriber", "endpoint", "phone"],
+        "device": ["device", "endpoint", "terminal", "phone"],
+        "server": ["server", "sip server", "proxy server", "registrar server"],
+        "client": ["client", "sip client", "user agent", "endpoint"],
+
+        # 设备问题关键词
+        "failure": ["failure", "failed", "error", "issue"],
+        "problem": ["problem", "issue", "trouble", "difficulty"],
+        "reject": ["reject", "rejection", "denial", "forbidden"],
+        "timeout": ["timeout", "time out", "connection timeout", "request timeout"],
+        "busy": ["busy", "user busy", "busy here", "unavailable"],
+        "offline": ["offline", "unreachable", "not available", "disconnected"],
+        "connection": ["connection", "connectivity", "network connection", "call connection"],
+    }
+
+    def __init__(self, llm_client: OpenAI, llm_model_id: str):
+        self.llm_client = llm_client
+        self.model_id = llm_model_id
+
+    def expand_query(self, query: str) -> Dict[str, any]:
+        """
+        智能查询扩展
+
+        Args:
+            query: 原始查询
+
+        Returns:
+            Dict: 包含扩展查询和关键词的字典
+        """
+        # 1. 判断查询复杂度
+        if self._is_simple_query(query):
+            # 2. 简单查询使用规则扩展
+            return self._rule_expand(query)
+        else:
+            # 3. 复杂查询使用LLM扩展
+            return self._llm_expand(query)
+
+    def _is_simple_query(self, query: str) -> bool:
+        """判断是否为简单查询（短且关键词明确）"""
+        query = query.lower().strip()
+
+        # 简单查询特征判断（综合多个因素）
+
+        # 1. 长度特征
+        if len(query) > 30:  # 太长的查询通常复杂
+            return False
+
+        # 2. 关键字分析
+        query_words = query.split()
+
+        # 3. 检查是否包含协议相关术语
+        protocol_words = list(self.PROTOCOL_RULES.keys())
+        keyword_matches = []
+        for word in query_words:
+            # 精确匹配和前缀匹配
+            for rule_key in protocol_words:
+                if word == rule_key or word.startswith(rule_key) or rule_key.startswith(word):
+                    keyword_matches.append(rule_key)
+                    break
+
+        # 4. 判断标准：匹配3个以上协议关键词或占字符比例超过30%
+        if len(keyword_matches) >= 3:
+            return True
+
+        # 5. 进一步判断：如果查询字符串中有常见协议术语
+        common_terms = ['sip', '403', '401', '404', '200', 'register', 'invite', 'rfc']
+        term_count = sum(1 for term in common_terms if term in query.lower())
+
+        if term_count >= 2:  # 如果包含2个以上关键词则认为简单
+            return True
+
+        # 6. 采用比例判断准则：关键术语占比超过30%
+        if keyword_matches and len(query) > 0:
+            # 计算关键术语的总长度
+            key_chars = sum(len(match) for match in keyword_matches)
+            ratio = key_chars / len(query)
+            if ratio >= 0.3:  # 占比30%以上认为简单
+                return True
+
+        return False
+
+    def _rule_expand(self, query: str) -> Dict[str, any]:
+        """本地规则扩展"""
+        # 提取协议相关关键词
+        query_lower = query.lower()
+        keywords = []
+        expanded_queries = [query]  # 保留原查询
+
+        # 匹配规则 - 全面匹配关键词
+        matched_rules = set()
+        for keyword, expansions in self.PROTOCOL_RULES.items():
+            if keyword in query_lower:
+                keywords.append(keyword)
+                matched_rules.add(keyword)
+                # 添加相关扩展
+                for expansion in expansions:
+                    if expansion not in expanded_queries:
+                        expanded_queries.append(expansion)
+
+        # 词频统计：找出高频匹配词
+        word_freq = {}
+        query_words = query_lower.split()
+        for word in query_words:
+            for rule_key in self.PROTOCOL_RULES.keys():
+                if rule_key in word or word in rule_key:
+                    word_freq[rule_key] = word_freq.get(rule_key, 0) + 1
+
+        # 基于词频添加更丰富的扩展
+        top_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:2]
+        for word_key, freq in top_words:
+            if word_key not in matched_rules:
+                for expansion in self.PROTOCOL_RULES.get(word_key, []):
+                    if expansion not in expanded_queries:
+                        expanded_queries.append(expansion)
+
+        # 如果没匹配到关键词，在无匹配情况下的改进策略
+        if not matched_rules and len(query) < 30:
+            # 简单的语义推断
+            if any(word in query_lower for word in ["sip", "sip protocol"]):
+                expanded_queries.extend(["SIP protocol", "Session Initiation Protocol"])
+            elif any(word in query_lower for word in ["register", "registration"]):
+                expanded_queries.extend(["registration", "user registration"])
+            elif any(word in query_lower for word in ["invite", "call"]):
+                expanded_queries.extend(["INVITE", "call setup"])
+
+        # 确保至少有原查询和一个扩展
+        if len(expanded_queries) <= 1:
+            # 添加更广泛的协议相关扩展
+            expanded_queries.extend([
+                f"关于{query}的处理方法",
+                f"SIP协议与{query}的关系"
+            ])
+
+        return {
+            "expanded_queries": expanded_queries,
+            "keywords": keywords
+        }
+
+    def _llm_expand(self, query: str) -> Dict[str, any]:
+        """LLM扩展（复杂查询）"""
+        try:
+            prompt = f"""你是一个核心网运维专家。请将以下用户口语化的问题转换成一个完整的故障排查请求，
+            并生成 3~5 个不同的检索表述（捕捉不同角度：协议方法、错误码、原因描述等）。
+
+            用户原始问题：{query}
+
+            请严格按照以下 JSON 格式输出：
+            {{
+                "expanded_queries": [
+                    "完整专业的故障排查描述，保留原始信息并补充可能的协议层面",
+                    "从错误码角度的表述",
+                    "从协议方法角度的表述",
+                    "从原因描述角度的表述"
+                ],
+                "keywords": ["关键词1", "关键词2"]
+            }}
+
+            要求：
+            - expanded_queries 至少包含第一条（增强后的完整描述）
+            - 每个扩展 query 要有不同的表述角度
+            - 保留所有原始信息（设备标识、IP、错误码等）
+            - 用专业术语描述，但不要添加没有依据的猜测
+            - 输出纯 JSON，不要其他文字"""
+
+            response = self.llm_client.chat.completions.create(
+                model=self.model_id,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                response_format={"type": "json_object"}
+            )
+
+            result = json.loads(response.choices[0].message.content)
+
+            # 确保至少包含原始查询
+            if result.get("expanded_queries"):
+                if query not in result["expanded_queries"]:
+                    result["expanded_queries"].insert(0, query)
+
+            return {
+                "expanded_queries": result.get("expanded_queries", [query]),
+                "keywords": result.get("keywords", [])
+            }
+
+        except Exception as e:
+            # 出错时返回基本扩展
+            error_print(f"LLM扩展失败，使用默认扩展: {e}")
+            return {
+                "expanded_queries": [query, f"关于{query}的协议规范"],
+                "keywords": []
+            }
+
+
+============================================================
+文件: rag.py
+============================================================
+import os
+import re
+import json
+import logging
+from sentence_transformers import SentenceTransformer
+from typing import List, Optional
+from dataclasses import dataclass
+from prompts import PROTOCOL_QUERY_PROMPT
+
+# Chroma 相关导入
+import chromadb
+from chromadb import Client
+from chromadb.config import Settings
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+from logger_config import user_print, info_print, debug_print, error_print, warn_print
+
+
+@dataclass
+class Document:
+    id: str
+    text: str
+    meta: dict
+
+
+class SbcRAG:
+    def __init__(self, embed_model: str, reranker=None, enable_rerank: bool = True, chroma_path: str = "chroma_db"):
+        self.model = SentenceTransformer(embed_model)
+        self.documents: List[Document] = []
+        self.query_prompt = "为这个句子生成表示以用于检索相关文章："
+        self.reranker = reranker
+        self.enable_rerank = enable_rerank
+        # Chroma数据库相关
+        self.chroma_path = chroma_path
+        os.makedirs(chroma_path, exist_ok=True)
+        # 使用PersistentClient确保本地持久化
+        self.client = Client(Settings(chroma_location=chroma_path, is_persistent=True))
+        self.collection = None
+        self._initialize_collection()
+
+    def add_document(self, document: Document):
+        emb = self.model.encode(document.text)
+        self.documents.append(document)
+        # 添加到Chroma数据库
+        self._add_document_to_chroma(document, emb)
+
+    def add_documents_batch(self, documents: List[Document], batch_size: int = 100):
+        """批量添加文档，分批编码避免内存溢出"""
+        texts = [doc.text for doc in documents]
+        embs = self.model.encode(texts, batch_size=batch_size, show_progress_bar=True)
+        for doc, emb in zip(documents, embs):
+            self.documents.append(doc)
+        # 添加到Chroma数据库
+        self._add_documents_to_chroma(documents, embs)
+
+    def search(self, query: str, top_k: int = 3, filter_meta: Optional[dict] = None,
+               input_enhancer=None, use_parent_context=True) -> List[Document]:
+        logger.info(f"开始RAG检索: 查询='{query}', top_k={top_k}")
+        # Query Expansion：多路检索
+        queries = [query]
+        if input_enhancer:
+            result = input_enhancer.enhance(query)
+            expanded = result.get("expanded_queries", [])
+            if expanded:
+                queries = expanded
+                logger.info(f"查询扩展: {expanded}")
+
+        # 收集所有查询的候选文档（去重）
+        all_candidates = {}
+        for i, q in enumerate(queries):
+            logger.info(f"执行第{i+1}个查询: '{q}'")
+            candidates = self._search_single(q, top_k=top_k * 3, filter_meta=filter_meta)
+            logger.info(f"查询 '{q}' 检索到 {len(candidates)} 个候选文档")
+            for doc in candidates:
+                if doc.id not in all_candidates:
+                    all_candidates[doc.id] = doc
+                    logger.debug(f"候选文档 ID: {doc.id}, 内容预览: {doc.text[:100]}...")
+
+        candidate_docs = list(all_candidates.values())
+        logger.info(f"去重后共有 {len(candidate_docs)} 个候选文档")
+
+        # Rerank：对候选集精细打分（enable_rerank=True + 有 reranker 时生效）
+        if self.enable_rerank and self.reranker and len(candidate_docs) > top_k:
+            logger.info("应用rerank排序")
+            candidate_docs = self.reranker.rerank(query, candidate_docs, top_k=top_k)
+        else:
+            candidate_docs = candidate_docs[:top_k]
+            logger.info(f"未使用rerank，返回前 {len(candidate_docs)} 个文档")
+
+        # Parent-Child上下文增强：如果启用了上下文扩展，并且文档有parent信息，则用完整父块替代子块
+        if use_parent_context:
+            logger.info("启用Parent-Child上下文增强")
+            enhanced_docs = []
+            parent_ids = set()
+            parent_cache = {}
+
+            # 第一步：收集所有需要的parent_id
+            for doc in candidate_docs:
+                if doc.meta.get('parent_section_id'):
+                    parent_ids.add(doc.meta['parent_section_id'])
+
+            # 第二步：获取所有parent文档并建立缓存
+            for parent_id in parent_ids:
+                parent_doc = self.get_document_by_id(parent_id)
+                if parent_doc:
+                    parent_cache[parent_id] = parent_doc
+                else:
+                    # 如果无法找到父文档，则使用原文档
+                    logger.warning(f"无法找到父文档 {parent_id}，使用原始文档")
+
+            # 第三步：替换子块为完整父块
+            for doc in candidate_docs:
+                if doc.meta.get('parent_section_id') and doc.meta['parent_section_id'] in parent_cache:
+                    parent_doc = parent_cache[doc.meta['parent_section_id']]
+                    # 创建一个新的文档对象，用父块内容替换子块内容
+                    enhanced_doc = Document(
+                        id=doc.id,
+                        text=parent_doc.text,
+                        meta={**doc.meta, **parent_doc.meta}
+                    )
+                    enhanced_docs.append(enhanced_doc)
+                    logger.debug(f"文档 {doc.id} 被父块 {parent_doc.id} 替换")
+                else:
+                    enhanced_docs.append(doc)
+
+            candidate_docs = enhanced_docs
+
+        logger.info(f"最终返回 {len(candidate_docs)} 个文档")
+        # 输出每个文档的原始文本
+        for i, doc in enumerate(candidate_docs):
+            logger.debug(f"文档 {i+1}: ID={doc.id}, 内容={doc.text}")
+
+        return candidate_docs
+
+    def _search_single(self, query: str, top_k: int = 3, filter_meta: Optional[dict] = None) -> List[Document]:
+        """单 query 混合检索（向量 + 关键词）"""
+        logger.info(f"执行单次检索: 查询='{query}', top_k={top_k}")
+        # 使用Chroma数据库进行检索
+        results = self._search_with_chroma(query, top_k, filter_meta)
+        logger.info(f"向量检索完成，返回 {len(results)} 个文档")
+        for i, doc in enumerate(results):
+            logger.debug(f"检索结果 {i+1}: ID={doc.id}, 内容预览={doc.text[:100]}...")
+        return results
+
+    def _initialize_collection(self):
+        """初始化Chroma集合"""
+        try:
+            # 创建或获取集合
+            self.collection = self.client.get_or_create_collection(
+                name="rag_documents",
+                metadata={"description": "RAG documents with embeddings"}
+            )
+        except Exception as e:
+            error_print(f"初始化Chroma集合失败: {e}")
+            # 创建一个新的集合
+            self.collection = self.client.create_collection(
+                name="rag_documents",
+                metadata={"description": "RAG documents with embeddings"}
+            )
+
+    def _add_document_to_chroma(self, document: Document, embedding):
+        """添加单个文档到Chroma数据库"""
+        try:
+            # 将元数据转换为字符串
+            meta_str = json.dumps(document.meta, ensure_ascii=False)
+
+            # 添加到Chroma
+            self.collection.add(
+                documents=[document.text],
+                embeddings=[embedding.tolist()],
+                metadatas=[{
+                    "doc_id": document.id,
+                    "meta": meta_str
+                }],
+                ids=[document.id]
+            )
+        except Exception as e:
+            error_print(f"添加文档到Chroma失败: {e}")
+
+    def _add_documents_to_chroma(self, documents: List[Document], embeddings):
+        """批量添加文档到Chroma数据库"""
+        try:
+            # 准备批量数据
+            documents_text = [doc.text for doc in documents]
+            embeddings_list = [emb.tolist() for emb in embeddings]
+            metadatas = []
+
+            for doc in documents:
+                meta_str = json.dumps(doc.meta, ensure_ascii=False)
+                metadatas.append({
+                    "doc_id": doc.id,
+                    "meta": meta_str
+                })
+
+            ids = [doc.id for doc in documents]
+
+            # 添加到Chroma
+            self.collection.add(
+                documents=documents_text,
+                embeddings=embeddings_list,
+                metadatas=metadatas,
+                ids=ids
+            )
+        except Exception as e:
+            error_print(f"批量添加文档到Chroma失败: {e}")
+
+    def _search_with_chroma(self, query: str, top_k: int, filter_meta: Optional[dict] = None) -> List[Document]:
+        """使用Chroma数据库进行向量检索"""
+        logger.info(f"Chroma向量检索: 查询='{query}', top_k={top_k}")
+        try:
+            # 编码查询
+            query_embedding = self.model.encode([query], normalize_embeddings=True)[0]
+
+            # 检索
+            results = self.collection.query(
+                query_embeddings=[query_embedding.tolist()],
+                n_results=top_k,
+                # 如果有过滤条件，则用metadata进行过滤
+                where=filter_meta if filter_meta else None
+            )
+
+            logger.debug(f"Chroma检索结果: {results}")
+
+            # 解析结果
+            docs = []
+            if 'ids' in results and results['ids']:
+                for i in range(len(results['ids'][0])):
+                    doc_id = results['ids'][0][i]
+                    text = results['documents'][0][i] if 'documents' in results and results['documents'] else ""
+                    meta_data = results['metadatas'][0][i] if 'metadatas' in results and results['metadatas'] else {}
+
+                    # 从元数据中还原meta信息
+                    meta = {}
+                    if 'meta' in meta_data:
+                        try:
+                            meta = json.loads(meta_data['meta'])
+                        except:
+                            pass
+
+                    # 构建文档对象
+                    doc = Document(
+                        id=doc_id,
+                        text=text,
+                        meta=meta
+                    )
+                    docs.append(doc)
+                    logger.debug(f"返回文档: ID={doc_id}, 内容预览={text[:100]}...")
+
+            logger.info(f"Chroma检索完成，返回 {len(docs)} 个文档")
+            return docs
+        except Exception as e:
+            logger.error(f"Chroma检索失败: {e}")
+            return []
+
+    # 持久化保存
+    def save(self, dir_path: str = "chroma_db"):
+        """确保目录存在并真正持久化知识库到磁盘"""
+        os.makedirs(dir_path, exist_ok=True)
+        try:
+            # 确保Chroma数据库数据已刷新到磁盘
+            # 通过直接调用集合操作来确保写入
+            collection = self.client.get_collection("rag_documents")
+            # 触发数据库刷新，确保数据写入磁盘
+            if collection.count() > 0:
+                # 验证数据存在并强制刷新到磁盘
+                collection.get(limit=1)
+            info_print(f"知识库已保存至{dir_path}，向量数据库文件已持久化到磁盘")
+        except Exception as e:
+            error_print(f"知识库持久化失败: {e}")
+            raise
+
+    # 加载数据库（直接初始化Chroma）
+    @classmethod
+    def load(cls, dir_path: str = "kb_store", embed_model: str = None):
+        """从磁盘加载已存在的Chroma知识库"""
+        try:
+            # Chroma数据库会自动从文件系统加载，无需手动重建向量
+            kb = cls(embed_model, chroma_path=os.path.join(dir_path, "chroma_db"))
+            # 读取文档元数据（可选）
+            return kb
+        except Exception as e:
+            error_print(f"加载知识库失败: {e}")
+            return None  # 程序会走正常重建流程
+
+    def get_document_by_id(self, doc_id: str) -> Document:
+        """
+        根据ID获取文档，支持Parent-Child结构
+        """
+        for doc in self.documents:
+            if doc.id == doc_id:
+                return doc
+        return None
+
+    def get_parent_document(self, doc: Document) -> Document:
+        """
+        根据Child文档获取Parent文档
+        """
+        logger.debug(f"get_parent_document 被调用，文档ID: {doc.id}")
+        # 检查文档meta中是否有parent信息
+        if 'parent_section_id' in doc.meta:
+            parent_id = doc.meta['parent_section_id']
+            logger.debug(f"找到父文档ID: {parent_id}")
+            parent_doc = self.get_document_by_id(parent_id)
+            if parent_doc:
+                logger.debug(f"成功获取父文档: {parent_doc.id}")
+                return parent_doc
+        logger.debug("未找到父文档，返回自身")
+        return doc  # 如果没有parent信息，返回自身
+
+    def get_sibling_documents(self, doc: Document) -> List[Document]:
+        """
+        获取同父文档的所有兄弟文档（同章节内的其他chunk）
+        """
+        logger.debug(f"get_sibling_documents 被调用，文档ID: {doc.id}")
+        if 'parent_section_id' not in doc.meta:
+            logger.debug("文档没有parent_section_id，返回自己")
+            return [doc]  # 如果没有parent信息，返回自己
+
+        parent_id = doc.meta['parent_section_id']
+        logger.debug(f"获取同父文档，父ID: {parent_id}")
+        siblings = []
+        for document in self.documents:
+            if document.meta.get('parent_section_id') == parent_id and document.id != doc.id:
+                siblings.append(document)
+                logger.debug(f"发现兄弟文档: {document.id}")
+
+        logger.debug(f"共找到 {len(siblings)} 个兄弟文档")
+        return siblings
+
+    def delete_document(self, doc_id: str) -> bool:
+        """
+        删除指定ID的文档及其在Chroma中的向量
+        """
+        try:
+            # 从Chroma数据库删除
+            self.collection.delete(ids=[doc_id])
+
+            # 从内存列表中删除
+            self.documents = [doc for doc in self.documents if doc.id != doc_id]
+
+            info_print(f"文档 {doc_id} 已从知识库中删除")
+            return True
+        except Exception as e:
+            error_print(f"删除文档失败: {e}")
+            return False
+
+    def delete_documents_by_metadata(self, filter_meta: dict) -> int:
+        """
+        根据元数据过滤删除文档
+        """
+        try:
+            # 获取要删除的文档ID
+            result = self.collection.get(where=filter_meta)
+            ids_to_delete = result['ids']
+
+            if not ids_to_delete:
+                info_print("未找到匹配的文档")
+                return 0
+
+            # 删除Chroma中的文档
+            self.collection.delete(ids=ids_to_delete)
+
+            # 从内存中删除
+            self.documents = [doc for doc in self.documents if doc.id not in ids_to_delete]
+
+            info_print(f"已删除 {len(ids_to_delete)} 个文档")
+            return len(ids_to_delete)
+        except Exception as e:
+            error_print(f"批量删除文档失败: {e}")
+            return 0
+
+    def get_documents_by_section(self, section_id: str) -> List[Document]:
+        """
+        根据章节ID获取所有该章节下的文档（用于Rerank时的章节一致性判断）
+        """
+        logger.debug(f"get_documents_by_section 被调用，章节ID: {section_id}")
+        section_docs = []
+        for document in self.documents:
+            # 确保兼容性：既支持parent_section_id也支持直接的section字段
+            if (document.meta.get('parent_section_id') == section_id or
+                    document.meta.get('section') == section_id):
+                section_docs.append(document)
+                logger.debug(f"章节 {section_id} 匹配文档: {document.id}")
+        logger.debug(f"章节 {section_id} 共有 {len(section_docs)} 个文档")
+        return section_docs
+
+
+    def protocol_query(self, query: str, top_k: int = 5, llm_client=None, model_id: str = None) -> str:
+        """
+        处理协议查询的完整流程：
+        1. RAG检索相关文档
+        2. 使用LLM对结果进行总结和解释
+        3. 返回用户友好的解释文本
+
+        Args:
+            query: 用户的查询问题
+            top_k: 检索返回的文档数量
+            llm_client: LLM客户端实例
+            model_id: LLM模型ID
+
+        Returns:
+            str: 协议解释结果
+        """
+        logger.info(f"开始协议查询: '{query}', top_k={top_k}")
+        if not llm_client or not model_id:
+            # 如果没有提供LLM客户端，返回基本的检索结果
+            docs = self.search(query, top_k=top_k)
+            logger.info(f"LLM客户端未提供，返回基础检索结果，共 {len(docs)} 个文档")
+            for i, doc in enumerate(docs):
+                logger.debug(f"文档 {i+1}: ID={doc.id}, 内容={doc.text[:200]}...")
+            if docs:
+                return f"检索到的文档片段：\n\n" + "\n\n".join(
+                    [doc.text[:500] + "..." if len(doc.text) > 500 else doc.text for doc in docs[:3]])
+            else:
+                return "未找到相关协议文档"
+
+        # 检索相关文档
+        docs = self.search(query, top_k=top_k)
+        logger.info(f"RAG检索完成，返回 {len(docs)} 个文档")
+        for i, doc in enumerate(docs):
+            logger.debug(f"检索文档 {i+1}: ID={doc.id}, 内容={doc.text[:200]}...")
+
+        if not docs:
+            return "未找到相关协议文档"
+
+        logger.debug(f"即将调用 _build_intelligent_content 处理 {len(docs)} 个文档")
+        # 智能处理：基于查询与文档标题的匹配度来决定返回内容
+        combined_content = self._build_intelligent_content(query, docs)
+
+        # 调试信息：显示喂给LLM的内容
+        logger.debug(f"=== LLM输入内容 ===")
+        logger.debug(f"查询: {query}")
+        logger.debug(f"组合内容预览: {combined_content[:500]}...")
+        logger.debug(f"=== LLM输入结束 ===")
+
+        # LLM总结提示
+        summary_prompt = PROTOCOL_QUERY_PROMPT.format(query=query, combined_content=combined_content)
+
+        try:
+            response = llm_client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": "你是一个专业的通信协议解释器，擅长解释SIP、RFC等协议规范。"},
+                    {"role": "user", "content": summary_prompt}
+                ],
+                temperature=0.2,
+                max_tokens=1000
+            )
+
+            # 调试信息：显示LLM输出
+            llm_output = response.choices[0].message.content
+            logger.debug(f"=== LLM输出内容 ===")
+            logger.debug(f"LLM输出: {llm_output}")
+            logger.debug(f"=== LLM输出结束 ===")
+
+            return llm_output
+        except Exception as e:
+            # 如果LLM出错，回退到返回文档片段
+            logger.error(f"LLM调用失败: {str(e)}")
+            return f"查询结果:\n\n" + "\n\n".join([doc.text[:500] + "..." if len(doc.text) > 500 else doc.text for doc in
+                                                   docs[:3]]) + f"\n\n(注意: LLM总结失败，仅显示原始文档. 错误: {str(e)})"
+
+
+    def _build_intelligent_content(self, query: str, docs: List[Document]) -> str:
+        """
+        智能构建查询内容：基于查询与文档标题的匹配度决定返回完整章节还是单个片段
+
+        策略：当查询与文档章节标题高度相关时，返回完整章节以提供更好的上下文
+        """
+        logger.debug(f"_build_intelligent_content 被调用，共 {len(docs)} 个文档")
+        # 计算每个文档的标题相关性得分
+        doc_scores = []
+        query_words = set(query.lower().split())
+
+        for i, doc in enumerate(docs):
+            logger.debug(f"处理文档 {i+1}: ID={doc.id}")
+            # 计算查询与文档标题的相似度
+            title = doc.meta.get('section_title', '')
+            if not title:
+                # 如果没有标题，使用文档内容前缀作为替代
+                title = doc.text[:100].lower()
+                logger.debug(f"无标题，使用内容前缀: {title[:50]}...")
+
+            title_words = set(title.lower().split())
+
+            # 计算交集和并集
+            intersection = query_words & title_words
+            union = query_words | title_words
+
+            if not union:  # 避免除零错误
+                score = 0
+            else:
+                # 使用Jaccard相似度计算
+                score = len(intersection) / len(union)
+
+            doc_scores.append((doc, score))
+            logger.debug(f"文档 {i+1} 得分: {score}")
+
+        # 按得分排序，取前3个最高相关度的文档
+        doc_scores.sort(key=lambda x: x[1], reverse=True)
+        top_docs = doc_scores[:3]  # 最多取3个最高相关度的
+
+        logger.debug(f"前3个最高相关文档: {[doc.id for doc, score in top_docs]}")
+
+        # 判断是否应该返回完整章节
+        should_return_complete = False
+        # 检查父文档匹配情况
+        parent_doc_counts = {}
+
+        for doc, score in top_docs:
+            # 重要：如果查询关键词与章节标题高度匹配，则返回完整章节
+            title_related = score > 0.3  # 30%的交集相似度阈值
+            logger.debug(f"文档 {doc.id} 标题相关性得分: {score}, 是否高度相关: {title_related}")
+
+            if title_related:
+                should_return_complete = True
+                # 统计同父文档的个数
+                parent_id = doc.meta.get('parent_section_id')
+                if parent_id:
+                    parent_doc_counts[parent_id] = parent_doc_counts.get(parent_id, 0) + 1
+                    logger.debug(f"文档 {doc.id} 的父文档ID: {parent_id}")
+
+            # 如果同一父文档有多个chunk被召回且达到阈值，也返回完整章节
+            if len(top_docs) >= 2 and parent_doc_counts.get(parent_id, 0) >= 2:
+                should_return_complete = True
+
+        logger.debug(f"应返回完整章节: {should_return_complete}")
+        logger.debug(f"父文档计数: {parent_doc_counts}")
+
+        # 实现策略选择
+        if should_return_complete:
+            # 对于高度相关文档，合并完整章节内容
+            logger.debug("选择返回完整章节内容")
+            return self._build_complete_section_content(docs)
+        else:
+            # 对于一般查询，使用单个chunk
+            logger.debug("选择返回单个chunk内容")
+            return "\n\n".join([f"文档片段 {i + 1}:\n{doc.text}" for i, doc in enumerate(docs)])
+
+
+    def _build_complete_section_content(self, docs: List[Document]) -> str:
+        """
+        构建完整章节内容：当文档与查询高度相关时，返回完整章节
+        """
+        logger.debug(f"_build_complete_section_content 被调用，共 {len(docs)} 个文档")
+        # 按章节分组
+        section_groups = {}
+        for doc in docs:
+            # 获取章节标识
+            section_id = doc.meta.get('parent_section_id') or doc.meta.get('section', 'unknown')
+            logger.debug(f"文档 {doc.id} 的章节ID: {section_id}")
+            if section_id not in section_groups:
+                section_groups[section_id] = []
+            section_groups[section_id].append(doc)
+
+        logger.debug(f"章节分组结果: {list(section_groups.keys())}")
+        # 构建完整章节内容
+        content_parts = []
+        for section_id, section_docs in section_groups.items():
+            logger.debug(f"处理章节 {section_id}，包含 {len(section_docs)} 个文档")
+            # 检查是否为完整的章节内容（而不是多个小chunk）
+            if len(section_docs) > 1 or (section_docs and section_docs[0].meta.get('section_title')):
+                # 获取章节信息
+                if section_docs[0].meta.get('section_title'):
+                    section_title = section_docs[0].meta['section_title']
+                    section_num = section_docs[0].meta.get('section', section_id)
+                else:
+                    section_title = "未知章节"
+                    section_num = section_id
+
+                logger.debug(f"章节 {section_id} 标题: {section_title}")
+                # 合并该章节的所有内容
+                all_content = '\n'.join([doc.text for doc in section_docs])
+                content_parts.append(f"### 章节：{section_title} ({section_num})\n{all_content}")
+            else:
+                # 单个chunk的情况，使用原有逻辑
+                content_parts.append(section_docs[0].text)
+                logger.debug(f"返回单个chunk")
+
+        result = "\n\n".join(content_parts)
+        logger.debug(f"完整章节内容构建完成，结果长度: {len(result)}")
+        return result
+
+
+def incremental_add(new_files_dir: str = "./knowledge_base/new_docs", cache_dir: str = "kb_store",
+                    embed_model: str = None):
+    # 加载已有数据库
+    if not os.path.exists(os.path.join(cache_dir, "docs.json")):
+        raise Exception("缓存不存在，请先执行全量构建。")
+    kb = SbcRAG.load(cache_dir, embed_model)
+    # 扫描新目录，获取所有 .md 文件
+    from document_loader import load_all_md_documents, semantic_chunk
+    raw_docs = load_all_md_documents(new_files_dir)
+    if not raw_docs:
+        info_print("无新增文档。")
+        return
+
+    all_chunks = []
+    for raw_doc in raw_docs:
+        chunks = semantic_chunk(raw_doc.content, raw_doc.meta)
+        for i, chunk in enumerate(chunks):
+            doc_id = f"{raw_doc.meta.get('title', 'doc')}_incr_{i}"
+            all_chunks.append(Document(id=doc_id, text=chunk, meta=raw_doc.meta))
+    kb.add_documents_batch(all_chunks)
+    # 保存回缓存
+    kb.save(cache_dir)
+    info_print(f"增量添加完成，共添加 {len(raw_docs)} 个文档，{sum(1 for d in kb.documents)} 个块。")
+
+
+def build_knowledge_base(base_dir: str, emb_model: str,
+                         cache_dir: str = "chroma_db",
+                         force_rebuild: bool = False,
+                         reranker=None) -> SbcRAG:
+    """
+    基础版知识库构建函数
+    """
+    from document_loader import load_all_md_documents, chunk_text, semantic_chunk
+    from chunker import RFCChunker, GPPChunker
+
+    if not force_rebuild and os.path.exists(os.path.join(cache_dir, "docs.json")):
+        info_print("从缓存中加载知识库")
+        kb = SbcRAG.load(cache_dir, emb_model)
+        if kb is not None:
+            return kb
+
+    info_print("正在重新构建知识库：初始化model...")
+
+    kb = SbcRAG(emb_model, reranker=reranker, chroma_path=os.path.join(cache_dir, "chroma_db"))
+
+    info_print("正在重新构建知识库：导入rawdata中...")
+    raw_docs = load_all_md_documents(base_dir)
+
+    info_print("正在重新构建知识库：chunk中...")
+    all_chunks = []
+    for raw_doc in raw_docs:
+        meta = raw_doc.meta
+        doc_type = meta.get('type', '')
+
+        # 使用专门的chunker处理RFC和3GPP文档
+        if doc_type == 'rfc':
+            # 使用专门的RFC chunker
+            rfc_chunker = RFCChunker()
+            try:
+                # 调用RFC专用chunker
+                chunks = rfc_chunker.chunk(raw_doc.content, meta)
+                for i, chunk in enumerate(chunks):
+                    # 直接使用chunk的内容和元数据
+                    doc_id = f"{meta.get('title', 'doc')}_rfc_chunk_{i}"
+                    all_chunks.append(Document(id=doc_id, text=chunk.content, meta=chunk.metadata))
+            except Exception as e:
+                info_print(f"RFC chunker处理失败，使用默认方法: {e}")
+                # 降级回原来的处理方式
+                chunks = semantic_chunk(raw_doc.content, meta)
+                for i, chunk in enumerate(chunks):
+                    doc_id = f"{meta.get('title', 'doc')}_chunk_{i}"
+                    all_chunks.append(Document(id=doc_id, text=chunk, meta=meta))
+        elif doc_type == '3gpp':
+            # 使用专门的3GPP chunker
+            gpp_chunker = GPPChunker()
+            try:
+                # 调用3GPP专用chunker
+                chunks = gpp_chunker.chunk(raw_doc.content, meta)
+                for i, chunk in enumerate(chunks):
+                    # 直接使用chunk的内容和元数据
+                    doc_id = f"{meta.get('title', 'doc')}_3gpp_chunk_{i}"
+                    all_chunks.append(Document(id=doc_id, text=chunk.content, meta=chunk.metadata))
+            except Exception as e:
+                info_print(f"3GPP chunker处理失败，使用默认方法: {e}")
+                # 降级回原来的处理方式
+                chunks = semantic_chunk(raw_doc.content, meta)
+                for i, chunk in enumerate(chunks):
+                    doc_id = f"{meta.get('title', 'doc')}_chunk_{i}"
+                    all_chunks.append(Document(id=doc_id, text=chunk, meta=meta))
+        else:
+            # 其他类型的文档使用默认处理
+            chunks = semantic_chunk(raw_doc.content, meta)
+            for i, chunk in enumerate(chunks):
+                doc_id = f"{meta.get('title', 'doc')}_chunk_{i}"
+                all_chunks.append(Document(id=doc_id, text=chunk, meta=meta))
+    info_print("正在重新构建知识库:批量向量化...")
+    kb.add_documents_batch(all_chunks)
+
+    info_print("正在重新构建知识库:持久化...")
+    kb.save(cache_dir)
+    return kb
+
+============================================================
+文件: reranker.py
+============================================================
+import os
+from sentence_transformers import CrossEncoder
+from config import RERANKER_MODEL
+
+
+class BGEReranker:
+    def __init__(self, model_path: str = None):
+        path = model_path or RERANKER_MODEL
+        self.model = CrossEncoder(path, max_length=512)
+
+    def rerank(self, query: str, documents: list, top_k: int = 5) -> list:
+        pairs = [(query, doc.text) for doc in documents]
+        scores = self.model.predict(pairs)
+        scored = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
+        return [doc for doc, _ in scored[:top_k]]
+
+
+============================================================
+文件: rfc_loader.py
+============================================================
+import re
+import os
+import requests
+import yaml
+from typing import List, Dict
+
+
+# ==================== 下载 ====================
+
+def download_rfc(rfc_number: int, output_dir: str = "raw_rfcs") -> str:
+    """从 rfc-editor.org 下载单个 RFC 原始文本"""
+    url = f"https://www.rfc-editor.org/rfc/rfc{rfc_number}.txt"
+    os.makedirs(output_dir, exist_ok=True)
+    file_path = os.path.join(output_dir, f"rfc{rfc_number}.txt")
+    if os.path.exists(file_path):
+        print(f"[跳过] RFC {rfc_number} 已存在")
+        return file_path
+    print(f"[下载] RFC {rfc_number} ...", end=" ")
+    try:
+        resp = requests.get(url, timeout=30)
+        if resp.status_code == 404:
+            print(f"不存在 (404)")
+            return None
+        resp.raise_for_status()
+        with open(file_path, "wb") as f:
+            f.write(resp.content)
+        print(f"完成")
+        return file_path
+    except Exception as e:
+        print(f"失败: {e}")
+        return None
+
+
+def download_rfcs_range(start: int, end: int, output_dir: str = "raw_rfcs") -> List[str]:
+    """批量下载 start~end 范围内的 RFC，自动跳过不存在的编号"""
+    downloaded = []
+    for num in range(start, end + 1):
+        path = download_rfc(num, output_dir)
+        if path:
+            downloaded.append(path)
+    print(f"批量下载结束，成功 {len(downloaded)} 个")
+    return downloaded
+
+
+def download_rfcs_list(rfc_list: List[int], output_dir: str = "raw_rfcs") -> List[str]:
+    """批量下载指定列表中的 RFC，自动跳过不存在的编号"""
+    downloaded = []
+    for num in rfc_list:
+        path = download_rfc(num, output_dir)
+        if path:
+            downloaded.append(path)
+    print(f"批量下载结束，成功 {len(downloaded)} 个")
+    return downloaded
+
+
+# ==================== 清洗 ====================
+
+def clean_text(text: str) -> str:
+    """
+    移除 RFC 原始文本中的页眉、页脚、版权声明、换页符等噪声。
+    处理单行和多行格式的噪音。
+    """
+    # 换页符 → 换行
+    text = text.replace('\f', '\n')
+
+    # 单行页脚：Rosenberg, et. al.          Standards Track                     [Page 8]
+    text = re.sub(r'\n[^\n]*?\[Page \d+\][^\n]*\n', '\n', text)
+
+    # 多行页眉：RFC 3261 紧跟协议名跨多行
+    text = re.sub(r'\n(RFC\s+\d+[^\n]*\n)+', '\n', text)
+
+    # 版权声明块（跨多行，常见于 2008 年后的 RFC）
+    text = re.sub(
+        r'\n[Cc]opyright\s+\(?c\)?\s*\d{4}.*?'
+        r'(?:IETF Trust and the persons identified as the document authors\.?'
+        r'|All rights reserved\.?)'
+        r'[^\n]*\n',
+        '\n',
+        text,
+        flags=re.DOTALL
+    )
+
+    # 多次空行合并
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text
+
+
+def skip_table_of_contents(text: str) -> str:
+    """
+    跳过目录部分（Table of Contents），返回正文开始位置之后的文本。
+
+    直接以 "Table of Contents" 为界，返回其后的全部内容。
+    TOC 条目行（如 "1   Introduction .................... 5"）会在后续
+    split_into_sections 的 title_clean 步骤中被清理掉（去除点线页码），
+    不影响最终 chunk 质量。
+    """
+    toc_start = text.find('Table of Contents')
+    if toc_start == -1:
+        return text
+    return text[toc_start + len('Table of Contents'):]
+
+
+# ==================== 解析 & 写文件 ====================
+
+def parse_rfc_meta(text: str) -> Dict:
+    """从清洗后的文本中提取 RFC 编号、标题和摘要"""
+    rfc_num = ""
+    m = re.search(r'Request for Comments:\s*(\d+)', text)
+    if m:
+        rfc_num = m.group(1)
+    else:
+        m = re.search(r'RFC\s+(\d+)', text)
+        if m:
+            rfc_num = m.group(1)
+
+    title = ""
+    abstract = ""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().startswith('RFC') and rfc_num in line:
+            if i + 1 < len(lines) and lines[i + 1].strip():
+                title = lines[i + 1].strip()
+                break
+
+    # 提取 Abstract（紧跟 title 之后的几行）
+    abs_start = text.lower().find('abstract')
+    if abs_start != -1:
+        abs_line_start = text.find('\n', abs_start)
+        if abs_line_start != -1:
+            abs_block = text[abs_line_start:].split('\n\n')[0].strip()
+            abstract = re.sub(r'\s+', ' ', abs_block)
+
+    return {"rfc_number": rfc_num, "title": title, "abstract": abstract}
+
+
+def split_into_sections(text: str) -> List[Dict]:
+    """
+    将 RFC 正文按章节标题切分为若干 section。
+    章节标题格式：行首数字或大写字母开头，数字后有1+空格，跟标题文字。
+    匹配例如：1. Introduction、7.1 Requests、21.4.4 403 Forbidden、A Table of Timer Values
+    """
+    # 匹配：编号(可带点) + 至少1个空格 + 标题文字
+    # 支持格式：1 Introduction、1. Introduction、7.1 Requests、21.4.4 403 Forbidden、A Table
+    pattern = re.compile(r'^([A-Z]|\d+(?:\.\d+)*\.?)\s{1,}(.+)$', re.MULTILINE)
+    matches = list(pattern.finditer(text))
+
+    # Fallback：章节标题完全匹配不到时，将整段正文作为一个 section 返回
+    if not matches:
+        return [{"section": "", "section_title": "", "content": text.strip()}]
+
+    sections = []
+    for i, match in enumerate(matches):
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        sec_num = match.group(1)
+        title_raw = match.group(2)
+
+        # 清理标题中的省略号点线和页码（TOC 条目格式如 "Introduction . . . . . . . . . . . . . . . . . .  4"）
+        title_clean = re.sub(r'\s*\.{2,}\s*\d+\s*$', '', title_raw).strip()
+        if not title_clean:
+            title_clean = title_raw.strip()
+
+        content = text[start:end].strip()
+
+        # 跳过 TOC 条目：标题中含省略号点线，说明是目录项而非正文章节
+        if re.search(r'\.{2,}', title_raw):
+            continue
+
+        sections.append({
+            "section": sec_num,
+            "section_title": title_clean,
+            "content": content
+        })
+    return sections
+
+
+def write_rfc_as_md(
+    file_path: str,
+    output_dir: str = "knowledge_base/rfc",
+    meta_extra: dict = None
+) -> int:
+    """
+    主流程：读取原始 RFC 文本 → 清洗 → 解析元数据 → 写 .md 文件。
+
+    将 RFC 每个章节单独写成一个 .md 文件（YAML 头 + 正文），
+    供 document_loader.py 统一读取再做 semantic_chunk。
+
+    参数:
+        file_path: 原始 .txt 文件路径（如 raw_rfcs/rfc4924.txt）
+        output_dir: 输出的 .md 文件存放目录
+        meta_extra: 附加元数据（如 {"tags": ["SIP", "协议规范"]}）
+
+    返回:
+        写入的 .md 文件数量
+    """
+    # 从文件名直接提取 RFC 编号，避免正文引用其他 RFC 时误提取
+    rfc_number = os.path.basename(file_path).replace('rfc', '').replace('.txt', '')
+
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        raw_text = f.read()
+
+    cleaned = clean_text(raw_text)
+    rfc_info = parse_rfc_meta(cleaned)
+    body = skip_table_of_contents(cleaned)
+    sections = split_into_sections(body)
+
+    os.makedirs(output_dir, exist_ok=True)
+    default_meta = {
+        "type": "rfc",
+        "tags": ["RFC", "SIP", "协议规范"]
+    }
+    if meta_extra:
+        default_meta.update(meta_extra)
+
+    count = 0
+    suspicious = []  # 调试：记录 fallback 文件
+    first_section = True
+    for sec in sections:
+        meta = {
+            **default_meta,
+            "rfc_number": rfc_number,
+            "title": rfc_info["title"],
+            "section": sec["section"],
+            "section_title": sec["section_title"],
+        }
+
+        # Fallback 的 section 为空，打印来源信息
+        if not sec["section"]:
+            suspicious.append({
+                "file": file_path,
+                "rfc": rfc_number,
+                "content_preview": sec["content"][:100],
+            })
+
+        fname = f"rfc{rfc_number}_{sec['section'].replace('.', '_')}.md"
+        fpath = os.path.join(output_dir, fname)
+
+        # 首个 section 的正文前面拼接 abstract（对协议检索很有用）
+        content = sec["content"]
+        if first_section and rfc_info.get("abstract"):
+            content = f"【协议摘要】{rfc_info['abstract']}\n\n{content}"
+            first_section = False
+
+        with open(fpath, 'w', encoding='utf-8') as f:
+            yaml_str = yaml.dump(meta, allow_unicode=True, default_flow_style=False)
+            f.write(f"---\n{yaml_str}---\n\n")
+            f.write(content)
+        count += 1
+
+    # 只打印有问题的 RFC（fallback section=空 的那些）
+    if suspicious:
+        for s in suspicious:
+            print(f"[可疑] 源文件: {s['file']}  rfc: {s['rfc']}  内容片段: {s['content_preview'][:80]!r}")
+
+    return count
+
+
+# ==================== 批量入口 ====================
+
+def process_all_raw_rfcs(
+    raw_dir: str = "raw_rfcs",
+    output_dir: str = "knowledge_base/rfc",
+    meta_extra: dict = None
+) -> int:
+    """扫描 raw_dir 下所有 .txt 文件，统一走 write_rfc_as_md"""
+    total = 0
+    for fname in sorted(os.listdir(raw_dir)):
+        if fname.lower().endswith('.txt'):
+            path = os.path.join(raw_dir, fname)
+            try:
+                n = write_rfc_as_md(path, output_dir, meta_extra)
+                total += n
+            except Exception as e:
+                print(f"[错误] {fname}: {e}")
+    print(f"\n总计写入 {total} 个 .md 文件")
+    return total
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 3:
+        print("用法:")
+        print("  下载 RFC 范围:  python rfc_loader.py download 3000 6800")
+        print("  下载 RFC 列表:  python rfc_loader.py download_list 3000,3001,3002,4000")
+        print("  转换 MD:   python rfc_loader.py convert raw_rfcs knowledge_base/rfc")
+        sys.exit(1)
+
+    action = sys.argv[1]
+
+    if action == "download":
+        start = int(sys.argv[2])
+        end = int(sys.argv[3])
+        download_rfcs_range(start, end)
+
+    elif action == "download_list":
+        rfc_str_list = sys.argv[2].split(',')
+        rfc_list = [int(x.strip()) for x in rfc_str_list]
+        download_rfcs_list(rfc_list)
+
+    elif action == "convert":
+        raw_dir = sys.argv[2] if len(sys.argv) > 2 else "raw_rfcs"
+        output_dir = sys.argv[3] if len(sys.argv) > 3 else "knowledge_base/rfc"
+        process_all_raw_rfcs(raw_dir, output_dir)
+
+    else:
+        print(f"未知动作: {action}")
+
+
+============================================================
+文件: router.py
+============================================================
+import re
+from typing import List, Dict
+from logger_config import info_print, debug_print, error_print, warn_print
+
+class RouterAgent:
+    """
+    Query Routing系统，用于区分协议查询和故障诊断等不同类型的查询
+    实现Router Agent架构，将查询分为protocol_query和fault_diagnosis两个路径
+    """
+
+    def __init__(self):
+        # 协议查询关键词 - 增加更多高精度关键词
+        self.protocol_keywords = [
+            "是什么", "含义", "意思", "解释", "说明", "定义", "文档",
+            "状态码", "错误码", "码值", "响应", "返回", "描述",
+            "协议", "SIP", "RFC", "3GPP", "信令", "媒体", "注册",
+            "Invite", "200", "403", "401", "404", "500"
+        ]
+
+        # 故障诊断关键词 - 更具诊断性质的关键词
+        self.diagnosis_keywords = [
+            "失败", "错误", "问题", "故障", "怎么", "如何", "为什么",
+            "出现", "报错", "提示", "卡住", "无响应", "异常", "中断",
+            "掉线", "连接", "登录", "认证"
+        ]
+
+        # 协议相关词 - 这些词本身就是协议相关
+        self.protocol_related_words = [
+            "sip", "sbc", "rfc", "3gpp", "协议", "连接", "注册", "信令", "媒体",
+            "呼叫", "invite", "200", "403", "401", "404", "500"
+        ]
+
+        # 诊断性特征词
+        self.diagnosis_features = [
+            "怎么", "如何", "为什么", "出现", "报错", "提示", "检查", "调试"
+        ]
+
+    def route_query(self, query: str) -> str:
+        """
+        根据查询内容判断处理类型
+
+        Args:
+            query: 用户输入的查询语句
+
+        Returns:
+            str: 处理类型，"protocol_query" or "fault_diagnosis"
+        """
+        query_lower = query.lower().strip()
+
+        # 如果为空或长度过短，返回协议查询
+        if not query_lower or len(query_lower) < 3:
+            debug_print(f"输入过短: '{query}', 返回默认协议查询")
+            return "protocol_query"
+
+        # 计算各类关键词出现频率
+        protocol_score = 0
+        diag_score = 0
+        protocol_word_score = 0
+        diag_feature_score = 0
+
+        # 统计协议关键词
+        for keyword in self.protocol_keywords:
+            if keyword in query_lower:
+                protocol_score += 1
+
+        # 统计诊断关键词
+        for keyword in self.diagnosis_keywords:
+            if keyword in query_lower:
+                diag_score += 1
+
+        # 统计协议相关词汇
+        for word in self.protocol_related_words:
+            if word in query_lower:
+                protocol_word_score += 1
+
+        # 统计诊断特征词
+        for word in self.diagnosis_features:
+            if word in query_lower:
+                diag_feature_score += 1
+
+        # 计算置信度分数
+        protocol_confidence = protocol_score * 2 + protocol_word_score * 3 + diag_feature_score * 0.5
+        diag_confidence = diag_score * 2 + diag_feature_score * 3 + protocol_word_score * 0.5
+
+        # 判断逻辑优化：
+        # 1. 如果协议相关词较多且清晰，直接协议查询
+        # 2. 如果诊断特征明显，区分度高，故障诊断
+        # 3. 如果有矛盾判断，使用更保守的策略
+        # 4. 如果无法判断，或者为简单问题，返回协议查询，避免代理处理
+
+        # 协议查询优先的判断条件：
+        if (protocol_word_score >= 2 or
+            (protocol_score >= 1 and protocol_word_score >= 1) or
+            (protocol_confidence > diag_confidence and protocol_confidence > 3)):
+            debug_print(f"查询分类: '{query}' -> 协议查询 (置信度协议={protocol_confidence:.2f}, 诊断={diag_confidence:.2f})")
+            return "protocol_query"
+
+        # 故障诊断判断条件：
+        if (diag_score >= 1 or
+            diag_feature_score >= 1 or
+            (diag_confidence > protocol_confidence and diag_confidence > 3)):
+            debug_print(f"查询分类: '{query}' -> 故障诊断 (置信度协议={protocol_confidence:.2f}, 诊断={diag_confidence:.2f})")
+            return "fault_diagnosis"
+
+        # 保守措施：如果是简短而抽象的问题，倾向协议查询
+        if len(query_lower) < 10:
+            debug_print(f"简短查询处理: '{query}' -> 协议查询")
+            return "protocol_query"
+
+        # 其他情况默认返回协议查询（更保守）
+        debug_print(f"默认处理: '{query}' -> 协议查询")
+        return "protocol_query"
+
+    def is_protocol_query(self, query: str) -> bool:
+        """
+        判断是否为协议查询
+        """
+        return self.route_query(query) == "protocol_query"
+
+    def is_fault_diagnosis(self, query: str) -> bool:
+        """
+        判断是否为故障诊断查询
+        """
+        return self.route_query(query) == "fault_diagnosis"
+
+    def get_routing_confidence(self, query: str) -> Dict[str, float]:
+        """
+        获取路由判断的置信度信息
+        """
+        query_lower = query.lower().strip()
+        if not query_lower or len(query_lower) < 3:
+            return {"protocol": 0.5, "diagnosis": 0.5}
+
+        protocol_score = 0
+        diag_score = 0
+        protocol_word_score = 0
+        diag_feature_score = 0
+
+        for keyword in self.protocol_keywords:
+            if keyword in query_lower:
+                protocol_score += 1
+
+        for keyword in self.diagnosis_keywords:
+            if keyword in query_lower:
+                diag_score += 1
+
+        for word in self.protocol_related_words:
+            if word in query_lower:
+                protocol_word_score += 1
+
+        for word in self.diagnosis_features:
+            if word in query_lower:
+                diag_feature_score += 1
+
+        protocol_confidence = protocol_score * 2 + protocol_word_score * 3 + diag_feature_score * 0.5
+        diag_confidence = diag_score * 2 + diag_feature_score * 3 + protocol_word_score * 0.5
+
+        # 归一化到0-1之间
+        max_score = max(protocol_confidence, diag_confidence, 1)
+        return {
+            "protocol": protocol_confidence / max_score if max_score > 0 else 0.5,
+            "diagnosis": diag_confidence / max_score if max_score > 0 else 0.5
+        }
+
+
+============================================================
+文件: test_docling_3gpp.py
+============================================================
+#!/usr/bin/env python3
+"""
+测试Docling 3GPP处理功能
+"""
+
+import os
+import sys
+import traceback
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 添加当前目录到路径
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+def test_docling_processing():
+    """测试Docling处理功能"""
+    try:
+        # 直接测试3gpp_pdf_loader.py中的函数
+        from  threegpp_pdf_loader import extract_text_from_pdf_with_docling, split_3gpp_sections, generate_markdown_chunks
+
+        print("测试Docling 3GPP处理功能...")
+
+        # 测试文件路径
+        test_pdf = "raw_3gpps/ts_129214v160300p.pdf"
+
+        if os.path.exists(test_pdf):
+            print(f"测试文件存在: {test_pdf}")
+
+            # 测试文本提取
+            print("1. 测试文本提取...")
+            text = extract_text_from_pdf_with_docling(test_pdf)
+            print(f"提取文本长度: {len(text)} 字符")
+            print(f"前200字符预览: {text[:200]}...")
+
+            # 测试章节分割
+            print("\n2. 测试章节分割...")
+            chunks = split_3gpp_sections(text, "TS 29.212")
+            print(f"分割得到 {len(chunks)} 个章节块")
+
+            # 测试生成Markdown
+            print("\n3. 测试生成Markdown...")
+            output_dir = "temp_test_output"
+            generate_markdown_chunks(
+                pdf_path=test_pdf,
+                output_dir=output_dir,
+                spec_id="TS 29.212",
+                meta_extra={
+                    "interface": "Gx",
+                    "domain": "VoLTE",
+                    "tags": ["3GPP", "策略控制", "PCC", "Diameter"]
+                }
+            )
+            print(f"测试完成，输出目录: {output_dir}")
+        else:
+            print(f"测试文件不存在: {test_pdf}")
+            print("可能需要先下载3GPP测试文件或将路径改为实际存在的PDF文件")
+
+    except Exception as e:
+        print(f"测试过程中出现错误: {e}")
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    test_docling_processing()
+
+
+============================================================
+文件: test_rfc_chunker.py
+============================================================
+#!/usr/bin/env python3
+"""
+测试RFC chunker功能
+"""
+
+from chunker import RFCChunker
+import os
+
+def test_rfc_chunker_basic():
+    """测试基础RFC chunker功能"""
+    print("=== 测试RFC Chunker基础功能 ===")
+
+    # 创建测试用的RFC内容
+    test_content = """1. Introduction
+
+This document defines the Session Initiation Protocol (SIP) for initiating, modifying, and terminating sessions between two or more participants in a multimedia conference, including voice, video, and messaging.
+
+2. Conformance
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+
+21.4.2 401 Unauthorized
+
+The 401 response indicates that the request requires user authentication. The response MUST include a WWW-Authenticate header field containing a challenge applicable to the requested resource.
+
+403 Forbidden
+
+The 403 response indicates that the server understood the request but refuses to fulfill it. The server SHOULD include a message body that explains why the request was refused.
+
+4. Protocol Overview
+
+The SIP protocol is a text-based protocol for session establishment."""
+
+    meta = {'title': 'RFC3261', 'type': 'rfc', 'version': '1.0'}
+
+    print(f"测试内容长度: {len(test_content)} 字符")
+    print("测试文档内容预览:")
+    print(test_content[:200] + "..." if len(test_content) > 200 else test_content)
+    print("\n" + "="*50)
+
+    # 创建chunker实例
+    chunker = RFCChunker()
+
+    try:
+        # 调用chunk方法
+        chunks = chunker.chunk(test_content, meta)
+        print(f"成功切分出 {len(chunks)} 个chunk")
+
+        if chunks:
+            for i, chunk in enumerate(chunks[:3]):  # 显示前3个chunk
+                print(f"\nChunk {i+1}:")
+                print(f"  ID: {chunk.id}")
+                print(f"  Type: {chunk.source_type}")
+                print(f"  内容预览: {chunk.content[:100]}...")
+                print(f"  元数据: {chunk.metadata}")
+        else:
+            print("警告: 没有生成任何chunk")
+
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+def test_simple_rfc():
+    """测试简化版本的RFC"""
+    print("\n=== 测试简化版RFC ===")
+
+    simple_content = """1. Introduction
+This is the introduction section.
+
+2. Methods
+This describes the methods section.
+
+3. Conclusion
+This is the conclusion section.
+"""
+
+    meta = {'title': 'TestRFC', 'type': 'rfc'}
+
+    chunker = RFCChunker()
+    try:
+        chunks = chunker.chunk(simple_content, meta)
+        print(f"简化版测试 - 成功切分出 {len(chunks)} 个chunk")
+        for i, chunk in enumerate(chunks):
+            print(f"  Chunk {i+1}: {chunk.id} -> {len(chunk.content)} chars")
+            print(f"    Title: {chunk.metadata.get('title', 'N/A')}")
+            print(f"    Section ID: {chunk.metadata.get('section_id', 'N/A')}")
+    except Exception as e:
+        print(f"简化版错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+def test_specific_case():
+    """测试特定的RFC段落切割问题"""
+    print("\n=== 测试特定问题用例 ===")
+
+    # 这个文档片段来自RFC3261的测试数据
+    problematic_content = """1. Introduction
+
+This document defines the Session Initiation Protocol (SIP) for initiating, modifying, and terminating sessions between two or more participants in a multimedia conference, including voice, video, and messaging.
+
+2. Conformance
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+
+21.4.2 401 Unauthorized
+
+The 401 response indicates that the request requires user authentication. The response MUST include a WWW-Authenticate header field containing a challenge applicable to the requested resource.
+
+403 Forbidden
+
+The 403 response indicates that the server understood the request but refuses to fulfill it. The server SHOULD include a message body that explains why the request was refused.
+
+4. Protocol Overview
+
+The SIP protocol is a text-based protocol for session establishment."""
+
+    meta = {'title': 'RFC3261', 'type': 'rfc', 'version': '1.0'}
+
+    chunker = RFCChunker()
+    try:
+        chunks = chunker.chunk(problematic_content, meta)
+        print(f"问题用例 - 成功切分出 {len(chunks)} 个chunk")
+        for i, chunk in enumerate(chunks):
+            print(f"  Chunk {i+1}: {chunk.id}")
+            print(f"    内容长度: {len(chunk.content)} chars")
+            print(f"    内容预览: {chunk.content[:150]}...")
+            print(f"    标题: {chunk.metadata.get('title', 'N/A')}")
+            print(f"    章节ID: {chunk.metadata.get('section_id', 'N/A')}")
+            print()
+    except Exception as e:
+        print(f"问题用例错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+def test_more_sections():
+    """测试包含更多章节的RFC"""
+    print("\n=== 测试多章节RFC ===")
+
+    # 创建一个复杂些的RFC内容
+    complex_content = """1. Introduction
+
+The Session Initiation Protocol (SIP) is a signaling protocol used for initiating, modifying, and terminating multimedia sessions such as voice and video calls.
+
+2. Conformance
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+
+3. Protocol Overview
+
+The SIP protocol is a text-based protocol for session establishment. It uses a request-response model where each session state can be queried or modified by sending protocol messages.
+
+3.1. Message Structure
+
+SIP messages consist of a start line, zero or more header fields, an empty line (indicating the end of the header section), and an optional message body. The grammar for SIP messages is as follows:
+
+3.2. SIP Methods
+
+The following methods are defined for SIP:
+
+INVITE - Used to initiate a session.
+ACK - Used to acknowledge receipt of a response to an INVITE.
+CANCEL - Used to cancel a pending INVITE request.
+BYE - Used to terminate a session.
+
+4. Message Processing
+
+When a SIP message arrives at a server, the server performs the following steps:
+1. Parse the message structure.
+2. Check the message validity.
+3. Process the request (e.g. by forwarding, rejecting, or delivering to a user agent).
+4. Construct and send a response.
+5. Perform any required actions for the response (e.g. forward to another server for processing).
+
+4.1. Client Processing
+
+Client processing is performed in the context of a specific user agent or client. Client processing is described in Section 8.
+
+4.2. Server Processing
+
+Server processing is performed in the context of a specific server. Server processing is described in Section 9.
+
+5. SIP URIs
+
+SIP URIs are defined in RFC 3261. They are used to identify endpoints and users in a SIP network.
+
+6. Security Considerations
+
+The security of SIP is discussed in RFC 3327 and related specifications."""
+
+    meta = {'title': 'RFC3261', 'type': 'rfc', 'version': '1.0'}
+
+    chunker = RFCChunker()
+    try:
+        chunks = chunker.chunk(complex_content, meta)
+        print(f"多章节测试 - 成功切分出 {len(chunks)} 个chunk")
+        for i, chunk in enumerate(chunks):
+            print(f"  Chunk {i+1}: {chunk.id}")
+            print(f"    标题: {chunk.metadata.get('title', 'N/A')}")
+            print(f"    章节ID: {chunk.metadata.get('section_id', 'N/A')}")
+            print(f"    内容预览: {chunk.content[:200]}...")
+            print()
+    except Exception as e:
+        print(f"多章节测试错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    test_rfc_chunker_basic()
+    test_simple_rfc()
+    test_specific_case()
+    test_more_sections()
+
+
+============================================================
+文件: test_rfc_manual.py
+============================================================
+#!/usr/bin/env python3
+"""
+手动测试RFC chunker函数的正确性
+"""
+
+from chunker import RFCChunker
+
+def test_content():
+    # 原始测试内容，包含多个RFC章节，模拟真实分段结构
+    test_content = """1. Introduction
+
+This document defines the Session Initiation Protocol (SIP) for initiating, modifying, and terminating sessions between two or more participants in a multimedia conference, including voice, video, and messaging.
+
+2. Conformance
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
+
+21.4.2 401 Unauthorized
+
+The 401 response indicates that the request requires user authentication. The response MUST include a WWW-Authenticate header field containing a challenge applicable to the requested resource.
+
+403 Forbidden
+
+The 403 response indicates that the server understood the request but refuses to fulfill it. The server SHOULD include a message body that explains why the request was refused.
+
+4. Protocol Overview
+
+The SIP protocol is a text-based protocol for session establishment."""
+
+    meta = {'title': 'RFC3261', 'type': 'rfc'}
+
+    print("=== 实际 RFC 内容 ===")
+    print(test_content)
+    print("\n=== 期望结构 ===")
+    print("应分割为以下章节:")
+    print("1. Introduction (1. Introduction -> 1. Introduction 开头到 2. Conformance 开头)")
+    print("2. Conformance (2. Conformance -> 2. Conformance 开头到 21.4.2 开头)")
+    print("3. 401 Unauthorized (21.4.2 401 Unauthorized -> 21.4.2 401 Unauthorized 开头到 403 Forbidden 开头)")
+    print("4. 403 Forbidden (403 Forbidden -> 403 Forbidden 开头到 4. Protocol Overview 开头)")
+    print("5. Protocol Overview (4. Protocol Overview -> 4. Protocol Overview 开头到结尾)")
+    print("\n=== 手动分割结果 ===")
+
+    # 简手动测试结构
+    lines = test_content.split('\n')
+    print(f"总共有 {len(lines)} 行")
+
+    # 你需要这5个章节
+    expected_parts = [
+        ("1. Introduction", 0, 18),    # 从1. Introduction到2. Conformance前
+        ("2. Conformance", 18, 21),     # 从2. Conformance到21.4.2 401 Unauthorized前
+        ("21.4.2 401 Unauthorized", 21, 26),    # 从21.4.2 401 Unauthorized到403 Forbidden前
+        ("403 Forbidden", 26, 30),       # 从403 Forbidden到4. Protocol Overview前
+        ("4. Protocol Overview", 30, None) # 到结尾
+    ]
+
+    for i, (title, start_line, end_line) in enumerate(expected_parts):
+        if end_line is None:
+            line_content = lines[start_line:]
+        else:
+            line_content = lines[start_line:end_line]
+        content = '\n'.join(line_content)
+        print(f"\nPart {i+1}: {title}")
+        print(content[:200] + '...' if len(content) > 200 else content)
+
+if __name__ == "__main__":
+    test_content()
+
+
+============================================================
+文件: threegpp_pdf_loader.py
+============================================================
+import pathlib
+import os, re, yaml
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
+from docling.document_converter import PdfFormatOption, DocumentConverter, ImageFormatOption, PowerpointFormatOption, \
+    WordFormatOption, ExcelFormatOption, HTMLFormatOption
+
+
+def extract_text_from_pdf_with_docling(pdf_path: str) -> str:
+    """使用Docling从PDF提取结构化文本"""
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    # 指定模型路径
+    easyocr_model_storage_directory = os.path.join(BASE_DIR, "model_files","docling_models", "easyocr") # 使用绝对路径modelscope download --model Ceceliachenen/easyocr --local_dir ./easyocr
+    # 指定OCR模型
+    easyocr_options = EasyOcrOptions()
+    # 可以不设置，默认语言：["fr", "de", "es", "en"]
+    easyocr_options.lang = ['ch_sim', 'en']  # 中英文
+    easyocr_options.model_storage_directory = easyocr_model_storage_directory
+    artifacts_path = os.path.join(BASE_DIR, "model_files", "docling_models", "docling-models") # 使用绝对路径 modelscope download --model ds4sd/docling-models --local_dir ./docling-models
+    pipeline_options = PdfPipelineOptions(artifacts_path=artifacts_path)
+    # 设置支持OCR
+    pipeline_options.do_ocr = True
+    # 设置支持表结构
+    pipeline_options.do_table_structure = True
+
+    # 指定OCR模型
+    pipeline_options.ocr_options = easyocr_options
+
+    try:
+        # 使用Docling进行文档解析
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+                InputFormat.IMAGE: ImageFormatOption(pipeline_options=pipeline_options),
+                InputFormat.PPTX: PowerpointFormatOption(pipeline_options=pipeline_options),
+                InputFormat.DOCX: WordFormatOption(pipeline_options=pipeline_options),
+                InputFormat.XLSX: ExcelFormatOption(pipeline_options=pipeline_options),
+                InputFormat.HTML: HTMLFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        document = converter.convert(pdf_path)
+
+        # 提取文本内容
+        text_content = document.export_to_text()
+
+        return text_content
+    except Exception as e:
+        print(f"Docling解析失败，回退到PyMuPDF: {e}")
+        # 回退到原来的PyMuPDF方法
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path)
+        full_text = ""
+        for page in doc:
+            full_text += page.get_text()
+        doc.close()
+        return full_text
+
+def split_3gpp_sections(text:str, spec_id:str)->list:
+    """按3GPP章节标题分割，返回块列表"""
+
+    # 匹配章节标题 - 改进的正则表达式
+    # 支持更多3GPP格式：1. Introduction, 3.2.1 Title, 5A.2 Title etc.
+    pattern = re.compile(r'^(\d+(?:\.\d+)*[A-Z]?(?:\.\d+)*)(?:\s{2,})(.+?)(?=\n\d+(?:\.\d+)*[A-Z]?(?:\.\d+)*\s{2,}|\Z)', re.MULTILINE | re.DOTALL)
+    parts = pattern.split(text)
+
+    chunks = []
+
+    if len(parts) < 4:
+        return [{"section": "", "content": text}]
+
+    for i in range(1, len(parts), 3):
+        sec_num = parts[i].strip()
+        sec_title = parts[i+1].strip()
+        content = parts[i+2].strip() if (i+2) < len(parts) else ""
+
+        # 跳过无效内容
+        if len(content) < 30:
+            continue
+
+        # 添加结构化信息到章节标题
+        full_title = f"{sec_num} {sec_title}".strip()
+
+        # 若块太长(> 800)，再按段落细分 - 改进的细分逻辑
+        if len(content) > 800:
+            paras = re.split(r"\n\n", content)
+            sub_chunks = []
+            cur = ""
+            for p in paras:
+                if len(cur) + len(p) < 700:
+                    cur += "\n\n" + p if cur else p
+                else:
+                    if cur:
+                        sub_chunks.append(cur.strip())
+                    cur = p
+
+            if cur:
+                sub_chunks.append(cur.strip())
+
+            for j, sub in enumerate(sub_chunks):
+                chunks.append({"section": f"{sec_num}.{j+1}", "title": full_title, "content": sub})
+        else:
+            chunks.append({"section": sec_num, "title": full_title, "content": content})
+
+    return chunks
+
+def generate_markdown_chunks(pdf_path:str, output_dir: str, spec_id:str, meta_extra:dict):
+    """主流程：提取-》分块-》生成.md"""
+    os.makedirs(output_dir, exist_ok=True)
+    text = extract_text_from_pdf_with_docling(pdf_path)
+    chunks = split_3gpp_sections(text, spec_id)
+
+    for i, chunk in enumerate(chunks):
+        meta = {
+            "type": "3gpp",
+            "spec_id": spec_id,
+            "section": chunk.get("section", ""),
+            "title": chunk.get("title", f"{spec_id} {chunk.get('section', '')}"),
+            **meta_extra
+        }
+
+        yaml_header = yaml.dump(meta, allow_unicode=True, default_flow_style=False)
+        full_content  = f"---\n{yaml_header}---\n\n{chunk['content']}"
+        fname = f"{spec_id}_{chunk.get('section', 'unknown')}_{i}.md"
+        fpath = os.path.join(output_dir, fname)
+        with open(fpath, 'w', encoding='utf-8') as f:
+            f.write(full_content)
+
+    print(f"已生成{len(chunks)}个知识块，保存在{output_dir}")
+
+if __name__ == "__main__":
+    # 支持多个3GPP文件进行处理
+    pdf_files = [
+        ("raw_3gpps/ts_129212v190100p.pdf", "TS 29.212"),
+      #  ("raw_3gpps/ts_124229v190600p.pdf", "TS 24.229"),
+      #  ("raw_3gpps/ts_129213v190300p.pdf", "TS 29.213"),
+        #("raw_3gpps/ts_129061v190100p.pdf", "TS 29.061"),
+    ]
+
+    for pdf_path, spec_id in pdf_files:
+        if os.path.exists(pdf_path):
+            output_dir = f"knowledge_base/3gpp/{spec_id.replace('.', '_')}/processed"
+            generate_markdown_chunks(
+                pdf_path=pdf_path,
+                output_dir=output_dir,
+                spec_id=spec_id,
+                meta_extra={
+                    "interface": "Gx",  # 可以根据具体文件调整
+                    "domain": "VoLTE",  # 可以根据具体文件调整
+                    "tags": ["3GPP", "策略控制", "PCC", "Diameter"]
+                }
+            )
+        else:
+            print(f"文件不存在: {pdf_path}")
+
+
+============================================================
+文件: tools.py
+============================================================
+class SIPDiagnosticTools:
+    @staticmethod
+    def sip_capture(device_ip: str) -> str:
+        return "REGISTER sip:example.com SIP/2.0 -> 403 Forbidden"
+
+    @staticmethod
+    def search_logs(device_ip: str, keyword: str) -> str:
+        return f"日志查询结果：{keyword} 出现 3 次，最新一条：auth failure for user 1001"
+
+    @staticmethod
+    def check_config(device_ip: str, config_path: str) -> str:
+        return f"配置项 {config_path}：密码已设置，ACL 允许 192.168.1.0/24，未包含 10.0.0.0/24"
+
+    @staticmethod
+    def query_device_status(device_ip: str) -> str:
+        return "CPU 15%, 内存 48%, 活跃注册数 230"

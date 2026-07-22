@@ -1,30 +1,23 @@
 import json
 from openai import OpenAI
+from typing import List, Dict, Optional
+from query_expander import QueryExpander
 
 class InputEnhancer:
-    def __init__(self, llm_client: OpenAI, model: str):
-        self.client = llm_client
-        self.model = model
+    def __init__(self, llm_client: OpenAI, llm_model_id: str) -> None:
+        self.llm_client = llm_client
+        self.model_id = llm_model_id
+        self.query_expander = QueryExpander(llm_client, llm_model_id)
 
-    def enhance(self, raw_query: str) -> dict:
-        prompt = f"""你是一个SIP运维专家。请将用户口语化的问题转化为专业的故障排查请求，并提取关键的英文技术关键词。
+    def enhance(self, raw_query: str) -> Dict[str, any]:
+        """
+        一次性完成查询增强：生成扩展表述 + 提取关键词。
+        返回 {"expanded_queries": [...], "keywords": [...]}
+        """
+        # 使用智能扩展器
+        result = self.query_expander.expand_query(raw_query)
 
-用户原始问题：{raw_query}
-
-输出格式（JSON）：
-{{
-    "enhanced_query": "完整的专业排查描述",
-    "keywords": ["关键词1", "关键词2"]
-}}
-只输出 JSON，不要任何解释。"""
-
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            response_format={"type": "json_object"}
-        )
-        try:
-            return json.loads(response.choices[0].message.content)
-        except Exception:
-            return {"enhanced_query": raw_query, "keywords": []}
+        return {
+            "expanded_queries": result.get("expanded_queries", [raw_query]),
+            "keywords": result.get("keywords", [])
+        }
