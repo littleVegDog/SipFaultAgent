@@ -1,5 +1,32 @@
 # 项目修订记录
 
+## 2026-07-23 — Step 3: 创建单元测试 + 整理测试目录
+
+### 修改文件
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `tests/test_chunker.py` | **新建** | RFCChunker + GPPChunker 单元测试 (11 tests) |
+| `tests/test_hybrid_retriever.py` | **新建** | BM25Okapi + HybridRetriever 单元测试 (13 tests) |
+| `tests/test_document_loader.py` | **新建** | document_loader 单元测试 (13 tests) |
+| `tests/test_reranker.py` | **新建** | BGEReranker metadata boost 单元测试 (6 tests) |
+| `tests/__init__.py` | **新建** | 测试包初始化 |
+| `tests/test.py` | 迁移 | 从根目录移入 |
+| `tests/test_docling_3gpp.py` | 迁移 | 从根目录移入 |
+| `tests/test_rfc_chunker.py` | 迁移 | 从根目录移入 |
+| `tests/test_rfc_manual.py` | 迁移 | 从根目录移入 |
+
+### 测试覆盖
+
+```
+tests/test_chunker.py ...........  [11 passed]
+tests/test_document_loader.py ...  [13 passed]
+tests/test_hybrid_retriever.py ..  [需 sentence_transformers]
+tests/test_reranker.py .........    [需 sentence_transformers]
+```
+
+---
+
 ## 2026-07-23 — Step 2: 内存清理
 
 ### 修改文件
