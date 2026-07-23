@@ -8,13 +8,14 @@ from logger_config import user_print, info_print, debug_print, error_print, warn
 
 class SipFaultDiagAgent:
     def __init__(self, llm_client:OpenAI, tools:SIPDiagnosticTools, rag: SbcRAG, LLM_MODEL_ID,
-                 input_enhancer=None):
+                 input_enhancer=None, max_memory_turns: int = 20):
         self.llm_client = llm_client
         self.tools = tools
         self.rag = rag
         self.memory = []
         self.model_id = LLM_MODEL_ID
         self.input_enhancer = input_enhancer
+        self.max_memory_turns = max_memory_turns  # 限制对话轮数，防止 OOM
 
     def _call_llm(self)->dict:
         response= self.llm_client.chat.completions.create(
@@ -118,3 +119,10 @@ class SipFaultDiagAgent:
                 "role": "tool",       # ✅ 修复：工具返回应该使用 "tool" 角色
                 "content": f"工具结果：{result}"
             })
+
+            # 内存管理：超过 max_memory_turns 轮后，保留 system prompt + 最近 N 轮
+            max_msgs = 2 + self.max_memory_turns * 2  # system + user query + N × (assistant + tool)
+            if len(self.memory) > max_msgs:
+                # 保留第 0 条 (system) + 第 1 条 (user query) + 最后 max_msgs-2 条
+                self.memory = self.memory[:2] + self.memory[-(max_msgs - 2):]
+                debug_print(f"记忆裁剪: {len(self.memory)} 条 (上限 {max_msgs})")

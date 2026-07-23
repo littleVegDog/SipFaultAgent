@@ -154,6 +154,8 @@ class SbcRAG:
 
     def enable_hybrid_search(self, alpha: float = 0.5):
         """启用混合检索：构建 BM25 索引（需在所有文档加载后调用）"""
+        if not self.documents:
+            self.reload_documents()
         from hybrid_retriever import HybridRetriever
         self.hybrid_retriever = HybridRetriever(alpha=alpha)
         self.hybrid_retriever.build_index(self.documents)
@@ -285,6 +287,47 @@ class SbcRAG:
         except Exception as e:
             error_print(f"加载知识库失败: {e}")
             return None
+
+    # ---- 内存管理 ----
+
+    def unload_documents(self):
+        """释放内存中的文档列表（ChromaDB 仍然保留全部数据）。检索/删除等操作会回退到 ChromaDB 查询。"""
+        count = len(self.documents)
+        self.documents.clear()
+        logger.info(f"已释放 {count} 条文档的内存缓存（ChromaDB 数据不受影响）")
+
+    def reload_documents(self):
+        """从 ChromaDB 重新加载文档列表到内存（用于需要全量扫描的操作如 BM25 索引构建）"""
+        try:
+            results = self.collection.get()
+            if results and results['ids']:
+                self.documents = []
+                for i in range(len(results['ids'])):
+                    meta_data = results['metadatas'][i] if results['metadatas'] else {}
+                    meta = {}
+                    if 'meta' in meta_data:
+                        try:
+                            meta = json.loads(meta_data['meta'])
+                        except Exception:
+                            pass
+                    self.documents.append(Document(
+                        id=results['ids'][i],
+                        text=results['documents'][i] if results['documents'] else '',
+                        meta=meta
+                    ))
+                logger.info(f"已从 ChromaDB 重新加载 {len(self.documents)} 条文档")
+        except Exception:
+            logger.exception("从 ChromaDB 重新加载文档失败")
+
+    @property
+    def document_count(self) -> int:
+        """返回文档总数（优先内存，fallback ChromaDB）"""
+        if self.documents:
+            return len(self.documents)
+        try:
+            return self.collection.count()
+        except Exception:
+            return 0
 
     # ---- 文档管理 ----
 
@@ -614,6 +657,7 @@ def build_knowledge_base(base_dir: str, emb_model: str,
     _write_complete_marker(cache_dir)
     kb.enable_hybrid_search()
     info_print(f"知识库构建完成，共 {len(kb.documents)} 条文档已持久化至 {cache_dir}")
+    kb.unload_documents()  # 释放内存列表（ChromaDB 保留数据），BM25 独立持有索引
     return kb
 
 
@@ -674,4 +718,5 @@ def build_knowledge_base_enhanced(base_dir: str, emb_model: str,
     _write_complete_marker(cache_dir)
     kb.enable_hybrid_search()
     info_print(f"增强版知识库构建完成，共 {len(kb.documents)} 条文档已持久化至 {cache_dir}")
+    kb.unload_documents()
     return kb

@@ -118,7 +118,7 @@ def main():
                     info_print(f"条件解析失败: {e}")
 
         elif choice == "3":
-            info_print(f"当前知识库文档数量: {len(kb.documents)}")
+            info_print(f"当前知识库文档数量: {kb.document_count}")
 
         elif choice == "4":
             info_print("程序退出")

@@ -1,5 +1,17 @@
 # 项目修订记录
 
+## 2026-07-23 — Step 2: 内存清理
+
+### 修改文件
+
+| 文件 | 改动 |
+|------|------|
+| `agent.py` | `__init__` 加 `max_memory_turns=20`；`run()` 每轮追加后检查记忆长度，超过上限时保留 system prompt + 最近 N 轮 |
+| `rag.py` | 新增 `unload_documents()`（清空内存列表，ChromaDB 保留数据）、`reload_documents()`（从 ChromaDB 恢复）、`document_count` 属性（优先内存，fallback ChromaDB `collection.count()`）；`enable_hybrid_search()` 文档空时自动 reload；`build_knowledge_base` / `build_knowledge_base_enhanced` 构建完成后自动调用 `unload_documents()` |
+| `main.py` | `len(kb.documents)` → `kb.document_count`（内存卸载后仍可查询） |
+
+---
+
 ## 2026-07-23 — Step 1: 统一异常处理模式
 
 ### 背景
