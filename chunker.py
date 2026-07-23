@@ -8,7 +8,10 @@ from typing import List, Dict, Any
 from dataclasses import dataclass
 import re
 import json
+import logging
 from logger_config import info_print, debug_print, error_print
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Chunk:
@@ -98,11 +101,8 @@ class RFCChunker(BaseChunker):
             debug_print(f"RFC处理完成，返回 {len(result_chunks)} 个chunk")
             return result_chunks
 
-        except Exception as e:
-            error_print(f"RFC切分失败: {e}")
-            import traceback
-            traceback.print_exc()
-            # 出错时使用基础切分作为保底
+        except Exception:
+            logger.exception("RFC切分失败，回退到fallback切分")
             return self._fallback_chunk(content, metadata)
 
     def _extract_sections(self, text: str) -> List[Dict]:
@@ -272,10 +272,8 @@ class GPPChunker(BaseChunker):
             result_chunks = self.post_process(chunks)
             debug_print(f"3GPP处理完成，返回 {len(result_chunks)} 个chunk")
             return result_chunks
-        except Exception as e:
-            error_print(f"3GPP切分失败: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            logger.exception("3GPP切分失败，回退到fallback切分")
             return self._fallback_chunk(content, metadata)
 
     def _extract_3gpp_sections(self, text: str) -> List[Dict]:

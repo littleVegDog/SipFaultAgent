@@ -120,7 +120,7 @@ class SbcRAG:
                                 meta=json.loads(pmeta_str)
                             )
                     except Exception:
-                        pass
+                        logger.warning(f"ChromaDB 查询父文档 {parent_id} 失败，跳过")
                 if parent_doc:
                     parent_cache[parent_id] = parent_doc
 
@@ -254,7 +254,8 @@ class SbcRAG:
                         try:
                             meta = json.loads(meta_data['meta'])
                         except Exception:
-                            pass
+                            logger.debug(f"元数据JSON反序列化失败: {doc_id}")
+                            meta = {}
                     docs.append(Document(id=doc_id, text=text, meta=meta))
             logger.info(f"Chroma检索完成，返回 {len(docs)} 个文档")
             return docs

@@ -1,5 +1,26 @@
 # 项目修订记录
 
+## 2026-07-23 — Step 1: 统一异常处理模式
+
+### 背景
+根据检视意见，项目中异常处理模式不一致：存在裸 `pass` 静默吞异常、`traceback.print_exc()` 混用、`print()` 与 `logger` 混用等问题。
+
+### 修改文件
+
+| 文件 | 改动 |
+|------|------|
+| `document_loader.py` | `RFC chunker出错` 异常：`pass` → `logging.exception()` 记录完整 traceback |
+| `rag.py` | 父文档 ChromaDB 查询异常：裸 `except: pass` → `logger.warning()`；JSON 反序列化异常：`pass` → `logger.debug()` |
+| `chunker.py` | 新增 `logging.getLogger(__name__)`；RFCChunker / GPPChunker 的 `traceback.print_exc()` 全部替换为 `logger.exception()` |
+
+### 规则
+- 所有异常处理统一使用 `logging.getLogger(__name__)` 或 `logger_config` 函数
+- 禁止裸 `except: pass` — 至少记录 `logger.warning/debug`
+- 不再使用 `traceback.print_exc()` — 使用 `logger.exception()` 自动附带 traceback
+- 测试文件 (`test_*.py`) 和 CLI 工具 (`rfc_loader.py`) 允许 `print()` 风格
+
+---
+
 ## 2026-07-22 — Phase 1 RFC RECALL 提升
 
 ### 背景

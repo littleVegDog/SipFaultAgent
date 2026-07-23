@@ -214,9 +214,8 @@ def semantic_chunk(text:str, meta:dict)->List:
         rfc_chunker = RFCChunker()
         try:
             return rfc_chunker.chunk(text, meta)
-        except Exception as e:
-            logging.error(f"RFC chunker出错，使用默认方案: {e}")
-            pass
+        except Exception:
+            logging.exception("RFC chunker出错，回退到默认切分方案")
 
     # 其他文档类型使用原有策略
     return _semantic_chunk_old(text, meta)
