@@ -374,6 +374,62 @@ class GPPChunker(BaseChunker):
             )]
 
 
+class GenericChunker(BaseChunker):
+    """通用 Chunker：处理 case / community / product_doc / default 类型"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.chunk_size = kwargs.get('chunk_size', 500)
+        self.overlap = kwargs.get('overlap', 50)
+
+    def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        from document_loader import chunk_text, is_meaningless_chunk, clean_chunk_text
+        doc_type = metadata.get('type', 'default')
+
+        # 按 ## 二级标题切分
+        parts = re.split(r'(?=^## )', content, flags=re.MULTILINE)
+        if len(parts) <= 1:
+            # 无标题结构，直接用滑动窗口
+            text_chunks = chunk_text(content, chunk_size=self.chunk_size, overlap=self.overlap)
+        else:
+            text_chunks = []
+            for p in parts:
+                p = p.strip()
+                if len(p) < 30:
+                    continue
+                if len(p) > 600:
+                    subs = chunk_text(p, chunk_size=self.chunk_size, overlap=self.overlap)
+                    text_chunks.extend(subs)
+                else:
+                    text_chunks.append(p)
+
+        # 清洗 + 过滤
+        cleaned = []
+        for c in text_chunks:
+            if is_meaningless_chunk(c, metadata):
+                continue
+            c = clean_chunk_text(c)
+            if c:
+                cleaned.append(c)
+
+        if not cleaned and text_chunks:
+            fallback = clean_chunk_text(text_chunks[0])
+            cleaned = [fallback] if fallback else []
+
+        return [Chunk(id=f"chunk_{i}", content=t, metadata={**metadata, 'type': doc_type, 'chunk_index': i}, source_type=doc_type)
+                for i, t in enumerate(cleaned)]
+
+
+def get_chunker(doc_type: str, **kwargs) -> BaseChunker:
+    """根据文档类型返回对应的 Chunker 实例"""
+    if doc_type == 'rfc':
+        return RFCChunker(**kwargs)
+    elif doc_type == '3gpp':
+        return GPPChunker(**kwargs)
+    else:
+        return GenericChunker(**kwargs)
+
+
 # 测试函数，可直接运行
 def test_rfc_chunker():
     """测试RFC chunker"""

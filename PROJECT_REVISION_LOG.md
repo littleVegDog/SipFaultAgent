@@ -1,5 +1,28 @@
 # 项目修订记录
 
+## 2026-07-24 — Issue #3: 重构 Chunker 架构
+
+### 背景
+`semantic_chunk()` 在 `document_loader.py` 中既做通用切分又调用 RFC 专有 chunker，逻辑混乱。`build_knowledge_base` 应像 `build_knowledge_base_enhanced` 一样按文档类型分发到不同 chunker。
+
+### 修改
+
+| 文件 | 改动 |
+|------|------|
+| `chunker.py` | 新增 `GenericChunker`（处理 case/community/product_doc/default）+ `get_chunker(doc_type)` 分发器 |
+| `document_loader.py` | 重写 `semantic_chunk()` → 委托 `get_chunker()`；删除 `_semantic_chunk_old`/`extract_sections`/`_wrap_as_chunks`/`_post_process_chunks` 死代码（~200 行） |
+
+### 新架构
+
+```
+get_chunker(doc_type)
+  ├── 'rfc'    → RFCChunker      (章节编号切分 + parent_section_id)
+  ├── '3gpp'   → GPPChunker      (3GPP 规范专用)
+  └── default  → GenericChunker  (## 标题切分 + 滑动窗口 + 数据清洗)
+```
+
+---
+
 ## 2026-07-23 — Step 3: 创建单元测试 + 整理测试目录
 
 ### 修改文件
