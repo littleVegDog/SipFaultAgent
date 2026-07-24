@@ -1,28 +1,12 @@
-"""document_loader 单元测试"""
+"""document_loader 单元测试（parse + 数据清洗）"""
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
-from chunker import Chunk
 from document_loader import (
-    chunk_text, parse_markdown_with_yaml, RawDocument,
-    is_meaningless_chunk, clean_chunk_text, semantic_chunk
+    parse_markdown_with_yaml, RawDocument,
+    is_meaningless_chunk, clean_chunk_text
 )
-
-
-class TestChunkText:
-    def test_basic_chunk(self):
-        result = chunk_text("hello world " * 100, chunk_size=50, overlap=10)
-        assert len(result) > 1
-        assert all(isinstance(c, str) for c in result)
-
-    def test_short_text(self):
-        result = chunk_text("short", chunk_size=50, overlap=10)
-        assert len(result) == 1
-
-    def test_empty_text(self):
-        result = chunk_text("", chunk_size=50, overlap=10)
-        assert len(result) == 0
 
 
 class TestCleanChunkText:
@@ -49,41 +33,8 @@ class TestIsMeaninglessChunk:
                                      {"type": "rfc", "section_title": "Acknowledgements"})
 
     def test_valid_chunk(self):
-        # RFC 类型最小长度 80 字符
         text = "The 401 response indicates that the request requires user authentication and the server MUST include a WWW-Authenticate header."
         assert not is_meaningless_chunk(text, {"type": "rfc", "section_title": "401 Unauthorized"})
-
-
-class TestSemanticChunk:
-    def test_rfc_type_returns_list_of_chunk(self):
-        text = "1. Introduction\nThis is SIP.\n\n2. Methods\nREGISTER and INVITE.\n\n21.4.2 401 Unauthorized\nThe 401 response requires auth.\n\n403 Forbidden\nThe 403 response means access denied.\n\n4. Overview\nSIP protocol overview."
-        meta = {"type": "rfc", "title": "RFC3261"}
-        result = semantic_chunk(text, meta)
-        assert isinstance(result, list)
-        assert len(result) > 0
-        assert all(isinstance(c, Chunk) for c in result)
-
-    def test_rfc_chunk_has_metadata(self):
-        text = "1. Introduction\nThis introduces SIP.\n\n21.4.2 401 Unauthorized\nThe 401 response requires auth."
-        meta = {"type": "rfc", "title": "RFC3261"}
-        result = semantic_chunk(text, meta)
-        for chunk in result:
-            assert hasattr(chunk, 'content')
-            assert hasattr(chunk, 'metadata')
-
-    def test_case_type_returns_chunks(self):
-        text = "## 现象\n注册失败 403\n## 原因\nACL 配置错误\n## 解决方法\n调整 ACL"
-        meta = {"type": "case", "title": "case_001"}
-        result = semantic_chunk(text, meta)
-        assert isinstance(result, list)
-        assert all(isinstance(c, Chunk) for c in result)
-
-    def test_default_type_returns_chunks(self):
-        text = "This is a generic document with some text.\n" * 20
-        meta = {"type": "default"}
-        result = semantic_chunk(text, meta)
-        assert isinstance(result, list)
-        assert all(isinstance(c, Chunk) for c in result)
 
 
 class TestParseMarkdownWithYaml:

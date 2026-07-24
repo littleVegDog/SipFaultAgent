@@ -113,11 +113,11 @@ class SbcRAG:
                     try:
                         results = self.collection.get(ids=[parent_id])
                         if results and results['ids']:
-                            pmeta_str = results['metadatas'][0].get('meta', '{}') if results['metadatas'] else '{}'
+                            pmeta = self._parse_meta(results['metadatas'][0] if results['metadatas'] else {})
                             parent_doc = Document(
                                 id=results['ids'][0],
                                 text=results['documents'][0] if results['documents'] else '',
-                                meta=json.loads(pmeta_str)
+                                meta=pmeta
                             )
                     except Exception:
                         logger.warning(f"ChromaDB 查询父文档 {parent_id} 失败，跳过")
@@ -206,14 +206,30 @@ class SbcRAG:
                 metadata={"description": "RAG documents with embeddings"}
             )
 
+    @staticmethod
+    def _flatten_meta(meta: dict, doc_id: str) -> dict:
+        """将 meta 字段展开为 Chroma metadata 顶层键（支持 filter_meta 查询）"""
+        flat = {"doc_id": doc_id}
+        for k, v in meta.items():
+            if isinstance(v, (str, int, float, bool)):
+                flat[k] = v
+            elif isinstance(v, list):
+                flat[k] = ", ".join(str(x) for x in v)
+        return flat
+
+    @staticmethod
+    def _parse_meta(meta_data: dict) -> dict:
+        """从 Chroma metadata 还原 meta 字段（直接读取顶层键）"""
+        skip = {'doc_id'}
+        return {k: v for k, v in meta_data.items() if k not in skip and not k.startswith('_')}
+
     def _add_document_to_chroma(self, document: Document, embedding):
         """添加单个文档到Chroma数据库"""
         try:
-            meta_str = json.dumps(document.meta, ensure_ascii=False)
             self.collection.add(
                 documents=[document.text],
                 embeddings=[embedding.tolist()],
-                metadatas=[{"doc_id": document.id, "meta": meta_str}],
+                metadatas=[self._flatten_meta(document.meta, document.id)],
                 ids=[document.id]
             )
         except Exception as e:
@@ -224,7 +240,7 @@ class SbcRAG:
         try:
             documents_text = [doc.text for doc in documents]
             embeddings_list = [emb.tolist() for emb in embeddings]
-            metadatas = [{"doc_id": doc.id, "meta": json.dumps(doc.meta, ensure_ascii=False)} for doc in documents]
+            metadatas = [self._flatten_meta(doc.meta, doc.id) for doc in documents]
             ids = [doc.id for doc in documents]
             self.collection.add(
                 documents=documents_text,
@@ -251,13 +267,7 @@ class SbcRAG:
                     doc_id = results['ids'][0][i]
                     text = results['documents'][0][i] if 'documents' in results and results['documents'] else ""
                     meta_data = results['metadatas'][0][i] if 'metadatas' in results and results['metadatas'] else {}
-                    meta = {}
-                    if 'meta' in meta_data:
-                        try:
-                            meta = json.loads(meta_data['meta'])
-                        except Exception:
-                            logger.debug(f"元数据JSON反序列化失败: {doc_id}")
-                            meta = {}
+                    meta = self._parse_meta(meta_data)
                     docs.append(Document(id=doc_id, text=text, meta=meta))
             logger.info(f"Chroma检索完成，返回 {len(docs)} 个文档")
             return docs
@@ -279,10 +289,11 @@ class SbcRAG:
 
     @classmethod
     def load(cls, dir_path: str = "kb_store", embed_model: str = None):
-        """从ChromaDB加载已存在的知识库"""
+        """从ChromaDB加载已存在的知识库，并恢复 self.documents 供 Parent-Child 等操作"""
         try:
             chroma_path = os.path.join(dir_path, "chroma_db")
             kb = cls(embed_model, chroma_path=chroma_path)
+            kb.reload_documents()
             return kb
         except Exception as e:
             error_print(f"加载知识库失败: {e}")
@@ -304,16 +315,10 @@ class SbcRAG:
                 self.documents = []
                 for i in range(len(results['ids'])):
                     meta_data = results['metadatas'][i] if results['metadatas'] else {}
-                    meta = {}
-                    if 'meta' in meta_data:
-                        try:
-                            meta = json.loads(meta_data['meta'])
-                        except Exception:
-                            pass
                     self.documents.append(Document(
                         id=results['ids'][i],
                         text=results['documents'][i] if results['documents'] else '',
-                        meta=meta
+                        meta=self._parse_meta(meta_data)
                     ))
                 logger.info(f"已从 ChromaDB 重新加载 {len(self.documents)} 条文档")
         except Exception:
@@ -487,15 +492,18 @@ def incremental_add(new_files_dir: str = "./knowledge_base/new_docs", cache_dir:
     if not os.path.exists(os.path.join(cache_dir, "chroma_db")):
         raise Exception("ChromaDB 缓存不存在，请先执行全量构建。")
     kb = SbcRAG.load(cache_dir, embed_model)
-    from document_loader import load_all_md_documents, semantic_chunk
+    from document_loader import load_all_md_documents
+    from chunker import get_chunker
     raw_docs = load_all_md_documents(new_files_dir)
     if not raw_docs:
         info_print("无新增文档。")
         return
     all_chunks = []
     for raw_doc in raw_docs:
-        chunk_list = semantic_chunk(raw_doc.content, raw_doc.meta)
-        for i, chunk in enumerate(chunk_list):
+        doc_type = raw_doc.meta.get('type', 'default')
+        chunker = get_chunker(doc_type)
+        chunks = chunker.chunk(raw_doc.content, raw_doc.meta)
+        for i, chunk in enumerate(chunks):
             doc_id = f"{raw_doc.meta.get('title', 'doc')}_incr_{i}"
             all_chunks.append(Document(id=doc_id, text=chunk.content, meta=chunk.metadata))
     kb.add_documents_batch(all_chunks)
@@ -574,7 +582,8 @@ def build_knowledge_base(base_dir: str, emb_model: str,
     2. 分批扫描 → 切块 → 向量化 → 直接写入 ChromaDB（自动持久化）
     3. 每批记录断点，崩溃后可继续
     """
-    from document_loader import parse_markdown_with_yaml, semantic_chunk
+    from document_loader import parse_markdown_with_yaml
+    from chunker import get_chunker
 
     kb = None
     start_batch_idx = 0
@@ -626,9 +635,10 @@ def build_knowledge_base(base_dir: str, emb_model: str,
         for path in batch_paths:
             try:
                 raw_doc = parse_markdown_with_yaml(path)
-                # semantic_chunk() now returns List[Chunk] with preserved metadata
-                chunk_list = semantic_chunk(raw_doc.content, raw_doc.meta)
-                for i, chunk in enumerate(chunk_list):
+                doc_type = raw_doc.meta.get('type', 'default')
+                chunker = get_chunker(doc_type)
+                chunks = chunker.chunk(raw_doc.content, raw_doc.meta)
+                for i, chunk in enumerate(chunks):
                     doc_id = f"{raw_doc.meta.get('title', 'doc')}_chunk_{i}"
                     batch_chunks.append(Document(id=doc_id, text=chunk.content, meta=chunk.metadata))
             except Exception as e:
@@ -669,8 +679,8 @@ def build_knowledge_base_enhanced(base_dir: str, emb_model: str,
     增强版知识库构建：RFC 文档使用 RFCChunker 专用切分。
     ChromaDB 后端，自动持久化。
     """
-    from document_loader import load_all_md_documents, semantic_chunk
-    from chunker import RFCChunker
+    from document_loader import load_all_md_documents
+    from chunker import get_chunker, GenericChunker
 
     chroma_db_path = os.path.join(cache_dir, "chroma_db")
 
@@ -692,25 +702,15 @@ def build_knowledge_base_enhanced(base_dir: str, emb_model: str,
     all_chunks = []
     for raw_doc in raw_docs:
         meta = raw_doc.meta
-        doc_type = meta.get('type', '')
-        if doc_type == 'rfc':
-            rfc_chunker = RFCChunker()
-            try:
-                chunks = rfc_chunker.chunk(raw_doc.content, meta)
-                for i, chunk in enumerate(chunks):
-                    doc_id = f"{meta.get('title', 'doc')}_rfc_chunk_{i}"
-                    all_chunks.append(Document(id=doc_id, text=chunk.content, meta=chunk.metadata))
-            except Exception as e:
-                info_print(f"RFC chunker处理失败，使用默认方法: {e}")
-                chunk_list = semantic_chunk(raw_doc.content, meta)
-                for i, chunk in enumerate(chunk_list):
-                    doc_id = f"{meta.get('title', 'doc')}_chunk_{i}"
-                    all_chunks.append(Document(id=doc_id, text=chunk.content, meta=chunk.metadata))
-        else:
-            chunk_list = semantic_chunk(raw_doc.content, meta)
-            for i, chunk in enumerate(chunk_list):
-                doc_id = f"{meta.get('title', 'doc')}_chunk_{i}"
-                all_chunks.append(Document(id=doc_id, text=chunk.content, meta=chunk.metadata))
+        doc_type = meta.get('type', 'default')
+        chunker = get_chunker(doc_type)
+        try:
+            chunks = chunker.chunk(raw_doc.content, meta)
+        except Exception:
+            chunks = GenericChunker().chunk(raw_doc.content, meta)
+        for i, chunk in enumerate(chunks):
+            doc_id = f"{meta.get('title', 'doc')}_chunk_{i}"
+            all_chunks.append(Document(id=doc_id, text=chunk.content, meta=chunk.metadata))
 
     info_print("正在批量向量化并写入ChromaDB...")
     kb.add_documents_batch(all_chunks)

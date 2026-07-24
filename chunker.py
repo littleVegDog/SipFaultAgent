@@ -1,520 +1,287 @@
 """
-文档Chunker基类和RFC专用Chunker实现
-用于实现不同文档类型定制化切分策略
+文档 Chunker：按文档类型分发到不同的切分器。
+数据清洗在 parse 阶段（rfc_loader / 3gpp_pdf_loader 转 .md 时）完成，chunker 只做切分。
 """
 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 from dataclasses import dataclass
 import re
-import json
 import logging
-from logger_config import info_print, debug_print, error_print
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class Chunk:
-    """chunk数据结构"""
+    """chunk 数据结构"""
     id: str
     content: str
     metadata: Dict[str, Any]
     source_type: str
 
-class BaseChunker(ABC):
-    """Chunker基类"""
 
-    def __init__(self, **kwargs):
-        self.config = kwargs
+class BaseChunker(ABC):
+    """Chunker 基类"""
 
     @abstractmethod
     def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
-        """抽象方法：实现具体chunk逻辑"""
         pass
 
-    def validate_chunk(self, chunk: Chunk) -> bool:
-        """通用chunk验证"""
-        return (chunk.content and
-                len(chunk.content.strip()) > 10 and
-                chunk.id and
-                chunk.metadata is not None)
 
-    def post_process(self, chunks: List[Chunk]) -> List[Chunk]:
-        """通用后处理"""
-        # 去重，过滤等
-        return [chunk for chunk in chunks if self.validate_chunk(chunk)]
+# ==================== RFC Chunker ====================
 
 class RFCChunker(BaseChunker):
-    """RFC文档专用Chunker"""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        # RFC章节匹配模式 - 更宽松的匹配规则
-        self.section_pattern = r'^(\d+(?:\.\d+)*|[A-Z])(?:\s+)(.+)$'  # 允许一个以上的空格
+    """RFC 文档 Chunker：直接使用 metadata 中的 section_id/section_title，按段落切分"""
 
     def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
-        """
-        RFC文档专用切分逻辑
-        保持协议术语和章节结构的完整性
-        """
-        chunks = []
-        debug_print(f"开始处理RFC内容，长度={len(content)}")
+        section_id = str(metadata.get('section', metadata.get('section_id', '')))
+        section_title = metadata.get('section_title', '')
+        rfc_number = str(metadata.get('rfc_number', ''))
 
-        try:
-            # RFC结构拆分
-            sections = self._extract_sections(content)
-            debug_print(f"提取到 {len(sections)} 个章节")
-
-            for i, section in enumerate(sections):
-                section_id = section['id']
-                section_title = section['title']
-                section_content = section['content']
-                line_start = section['line_start']
-                line_end = section['line_end']
-
-                # 按照章节大小进行不同处理
-                if len(section_content) > 1000:
-                    # 大章节：进行细粒度切片，确保功能点完整性和语义完整性
-                    debug_print(f"处理大章节 {section_id}，长度: {len(section_content)}")
-                    sub_chunks = self._chunk_large_section(section_content, section_id,
-                                                         section_title, metadata)
-                    chunks.extend(sub_chunks)
-                else:
-                    # 小章节：直接保留完整内容
-                    debug_print(f"处理小章节 {section_id}，长度: {len(section_content)}")
-                    chunk_content = f"## {section_title} ({section_id})\n\n{section_content}"
-                    chunks.append(Chunk(
-                        id=f"{section_id}",
-                        content=chunk_content,
-                        metadata={**metadata,
-                                'section_id': section_id,
-                                'title': section_title,
-                                'line_start': line_start,
-                                'line_end': line_end,
-                                'type': 'rfc_section',
-                                'parent_section_id': section_id},
-                        source_type='rfc'
-                    ))
-
-            # 后处理
-            result_chunks = self.post_process(chunks)
-            debug_print(f"RFC处理完成，返回 {len(result_chunks)} 个chunk")
-            return result_chunks
-
-        except Exception:
-            logger.exception("RFC切分失败，回退到fallback切分")
-            return self._fallback_chunk(content, metadata)
-
-    def _extract_sections(self, text: str) -> List[Dict]:
-        """
-        提取RFC结构章节信息
-        RFC典型格式：如 "1. Introduction" 或 "21.4.2 401 Unauthorized"
-        """
-        sections = []
-        lines = text.split('\n')
-
-        current_section = None
-        current_content = []
-        debug_print(f"开始提取章节，总行数: {len(lines)}")
-
-        for line_num, line in enumerate(lines):
-            # 匹配章节标题行 - RFC常用格式
-            # 如: "1. Introduction"  或 "21.4.2 401 Unauthorized"
-            section_match = re.match(self.section_pattern, line.strip())
-
-            if section_match:
-                debug_print(f"匹配到章节标题: \"{line.strip()}\" -> {section_match.groups()}")
-                # 保存前一个章节
-                if current_section:
-                    sections.append({
-                        'id': current_section['id'],
-                        'title': current_section['title'],
-                        'content': '\n'.join(current_content).strip(),
-                        'line_start': current_section['line_start'],
-                        'line_end': line_num - 1
-                    })
-
-                # 开始新章节
-                section_id = section_match.group(1).strip()
-                title = section_match.group(2).strip()
-                current_section = {
-                    'id': section_id,
-                    'title': title,
-                    'line_start': line_num
-                }
-                current_content = [line]  # 包含章节标题行
-            else:
-                # 非章节行，归属当前章节
-                if current_section:
-                    current_content.append(line)
-
-        # 处理最后一个章节
-        if current_section:
-            sections.append({
-                'id': current_section['id'],
-                'title': current_section['title'],
-                'content': '\n'.join(current_content).strip(),
-                'line_start': current_section['line_start'],
-                'line_end': len(lines) - 1
-            })
-
-        debug_print(f"成功提取 {len(sections)} 个章节")
-        return sections
-
-    def _chunk_large_section(self, content: str, section_id: str,
-                           section_title: str, metadata: Dict[str, Any]) -> List[Chunk]:
-        """处理大章节的子切片"""
-        chunks = []
-        debug_print(f"开始大章节切分: {section_id}")
-
-        # 简单按段落切分，保持内容连贯性
-        paragraphs = content.split('\n\n')
-
-        current_chunk = ""
-        chunk_id = 0
-
-        # 开始循环段落
-        for para in paragraphs:
-            if para.strip():
-                # 检查是否可以在当前chunk里添加这个段落
-                if len(current_chunk) + len(para) + 2 > 700:  # 700字符限制
-                    if current_chunk.strip():
-                        # 保存当前chunk
-                        chunk_content = f"## {section_title} ({section_id})\n\n{current_chunk.strip()}"
-                        chunks.append(Chunk(
-                            id=f"{section_id}_sub_{chunk_id}",
-                            content=chunk_content,
-                            metadata={**metadata,
-                                    'section_id': section_id,
-                                    'sub_section_id': f"{section_id}_sub_{chunk_id}",
-                                    'title': section_title,
-                                    'type': 'rfc_subsection',
-                                    'parent_section_id': section_id},
-                            source_type='rfc'
-                        ))
-                        chunk_id += 1
-                        current_chunk = para + "\n\n"  # 开始新chunk
-                    else:
-                        # 当前块为空，直接用新段落
-                        current_chunk = para + "\n\n"
-                else:
-                    current_chunk += para + "\n\n"
-
-        # 处理剩余内容
-        if current_chunk.strip():
-            chunk_content = f"## {section_title} ({section_id})\n\n{current_chunk.strip()}"
-            chunks.append(Chunk(
-                id=f"{section_id}_sub_{chunk_id}",
+        # 短章节：直接整体返回
+        if len(content) <= 1000:
+            chunk_content = f"## {section_title} ({section_id})\n\n{content}" if section_title else content
+            chunk_id = f"rfc{rfc_number}_{section_id.replace('.', '_')}" if section_id else f"rfc{rfc_number}"
+            return [Chunk(
+                id=chunk_id,
                 content=chunk_content,
-                metadata={**metadata,
-                        'section_id': section_id,
-                        'sub_section_id': f"{section_id}_sub_{chunk_id}",
-                        'title': section_title,
-                        'type': 'rfc_subsection',
-                        'parent_section_id': section_id},
-                source_type='rfc'
-            ))
-
-        return chunks
-
-    def _fallback_chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
-        """错误时的回退切分方案"""
-        # 基础滑动窗口，先做最小保障
-        try:
-            from document_loader import chunk_text
-            basic_chunks = chunk_text(content, chunk_size=500, overlap=50)
-            return [Chunk(
-                id=f"fallback_chunk_{i}",
-                content=chunk,
-                metadata={**metadata, 'type': 'fallback_chunk', 'source': 'rfc'},
-                source_type='rfc'
-            ) for i, chunk in enumerate(basic_chunks)]
-        except Exception as e:
-            # 最后保障：返回整体文档
-            error_print(f"回退切分失败: {e}")
-            return [Chunk(
-                id=f"fallback_full",
-                content=content,
-                metadata={**metadata, 'type': 'fallback_full', 'source': 'rfc'},
+                metadata={**metadata, 'section_id': section_id, 'title': section_title,
+                          'type': 'rfc_section', 'parent_section_id': section_id},
                 source_type='rfc'
             )]
 
-
-class GPPChunker(BaseChunker):
-    """3GPP文档专用Chunker"""
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.section_pattern = r'^(\d+(?:\.\d+)*[A-Z]?(?:\.\d+)*)(?:\s{2,})(.+?)(?=\n\d+(?:\.\d+)*[A-Z]?(?:\.\d+)*\s{2,}|\Z)'
-
-    def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
-        """3GPP文档专用切分逻辑"""
+        # 长章节：按段落切分子块
+        paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
         chunks = []
-        debug_print(f"开始处理3GPP内容，长度={len(content)}")
-        try:
-            sections = self._extract_3gpp_sections(content)
-            for i, section in enumerate(sections):
-                section_id = section['id']
-                section_title = section['title']
-                section_content = section['content']
-                if len(section_content) > 1500:
-                    sub_chunks = self._chunk_large_3gpp_section(section_content, section_id,
-                                                              section_title, metadata)
-                    chunks.extend(sub_chunks)
-                else:
-                    chunk_content = f"### {section_title} ({section_id})\n\n{section_content}"
-                    chunks.append(Chunk(
-                        id=f"{section_id}",
-                        content=chunk_content,
-                        metadata={**metadata, 'section_id': section_id, 'title': section_title, 'type': '3gpp_section', 'parent_section_id': section_id},
-                        source_type='3gpp'
-                    ))
-            result_chunks = self.post_process(chunks)
-            debug_print(f"3GPP处理完成，返回 {len(result_chunks)} 个chunk")
-            return result_chunks
-        except Exception:
-            logger.exception("3GPP切分失败，回退到fallback切分")
-            return self._fallback_chunk(content, metadata)
+        current = ""
+        sub_id = 0
 
-    def _extract_3gpp_sections(self, text: str) -> List[Dict]:
-        sections = []
-        lines = text.split('\n')
-        current_section = None
-        current_content = []
-        for line_num, line in enumerate(lines):
-            section_match = re.match(self.section_pattern, line.strip(), re.MULTILINE | re.DOTALL)
-            if section_match and len(line.strip()) > 10:
-                if current_section:
-                    sections.append({
-                        'id': current_section['id'], 'title': current_section['title'],
-                        'content': '\n'.join(current_content).strip(),
-                    })
-                section_id = section_match.group(1).strip()
-                title = section_match.group(2).strip()
-                current_section = {'id': section_id, 'title': title}
-                current_content = [line]
-            else:
-                if current_section:
-                    current_content.append(line)
-        if current_section:
-            sections.append({
-                'id': current_section['id'], 'title': current_section['title'],
-                'content': '\n'.join(current_content).strip(),
-            })
-        return sections
-
-    def _chunk_large_3gpp_section(self, content: str, section_id: str,
-                                section_title: str, metadata: Dict[str, Any]) -> List[Chunk]:
-        chunks = []
-        paragraphs = content.split('\n\n')
-        current_chunk = ""
-        chunk_id = 0
-        structured_paragraphs = []
         for para in paragraphs:
-            if para.strip():
-                if para.strip().startswith(('Note:', 'Important:', 'Caution:', 'Example:', 'Warning:', 'Note')):
-                    if current_chunk:
-                        structured_paragraphs.append(current_chunk)
-                        current_chunk = ""
-                    structured_paragraphs.append(para)
-                else:
-                    if current_chunk:
-                        current_chunk += "\n\n" + para
-                    else:
-                        current_chunk = para
-        if current_chunk:
-            structured_paragraphs.append(current_chunk)
-        for para in structured_paragraphs:
-            if para.strip():
-                if len(current_chunk) + len(para) + 2 > 1000:
-                    if current_chunk.strip():
-                        chunk_content = f"### {section_title} ({section_id})\n\n{current_chunk.strip()}"
-                        chunks.append(Chunk(
-                            id=f"{section_id}_sub_{chunk_id}",
-                            content=chunk_content,
-                            metadata={**metadata, 'section_id': section_id,
-                                    'sub_section_id': f"{section_id}_sub_{chunk_id}",
-                                    'title': section_title, 'type': '3gpp_subsection',
-                                    'parent_section_id': section_id},
-                            source_type='3gpp'
-                        ))
-                        chunk_id += 1
-                        current_chunk = para + "\n\n"
-                    else:
-                        current_chunk = para + "\n\n"
-                else:
-                    current_chunk += para + "\n\n"
-        if current_chunk.strip():
-            chunk_content = f"### {section_title} ({section_id})\n\n{current_chunk.strip()}"
+            if current and len(current) + len(para) + 2 > 700:
+                chunk_content = f"## {section_title} ({section_id})\n\n{current.strip()}"
+                chunks.append(Chunk(
+                    id=f"rfc{rfc_number}_{section_id.replace('.', '_')}_sub_{sub_id}",
+                    content=chunk_content,
+                    metadata={**metadata, 'section_id': section_id,
+                              'sub_section_id': f"{section_id}_sub_{sub_id}",
+                              'title': section_title, 'type': 'rfc_subsection',
+                              'parent_section_id': section_id},
+                    source_type='rfc'
+                ))
+                sub_id += 1
+                current = para
+            else:
+                current = current + "\n\n" + para if current else para
+
+        if current.strip():
+            chunk_content = f"## {section_title} ({section_id})\n\n{current.strip()}"
             chunks.append(Chunk(
-                id=f"{section_id}_sub_{chunk_id}",
+                id=f"rfc{rfc_number}_{section_id.replace('.', '_')}_sub_{sub_id}",
                 content=chunk_content,
                 metadata={**metadata, 'section_id': section_id,
-                        'sub_section_id': f"{section_id}_sub_{chunk_id}",
-                        'title': section_title, 'type': '3gpp_subsection', 'parent_section_id': section_id},
-                source_type='3gpp'
+                          'sub_section_id': f"{section_id}_sub_{sub_id}",
+                          'title': section_title, 'type': 'rfc_subsection',
+                          'parent_section_id': section_id},
+                source_type='rfc'
             ))
-        return chunks
 
-    def _fallback_chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
-        try:
-            from document_loader import chunk_text
-            basic_chunks = chunk_text(content, chunk_size=500, overlap=50)
+        return chunks if chunks else [Chunk(
+            id=f"rfc{rfc_number}_{section_id.replace('.', '_')}",
+            content=content,
+            metadata={**metadata, 'section_id': section_id, 'title': section_title,
+                      'type': 'rfc_section', 'parent_section_id': section_id},
+            source_type='rfc'
+        )]
+
+
+# ==================== 3GPP Chunker ====================
+
+class GPPChunker(BaseChunker):
+    """3GPP 文档 Chunker：和 RFCChunker 一致，直接用 metadata + 段落切分"""
+
+    def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        section_id = str(metadata.get('section', metadata.get('section_id', '')))
+        section_title = metadata.get('section_title', metadata.get('title', ''))
+        spec_id = str(metadata.get('spec_id', ''))
+
+        if len(content) <= 1500:
+            chunk_content = f"### {section_title} ({section_id})\n\n{content}" if section_title else content
             return [Chunk(
-                id=f"fallback_chunk_{i}", content=chunk,
-                metadata={**metadata, 'type': 'fallback_chunk', 'source': '3gpp'},
-                source_type='3gpp'
-            ) for i, chunk in enumerate(basic_chunks)]
-        except Exception as e:
-            error_print(f"3GPP回退切分失败: {e}")
-            return [Chunk(
-                id=f"fallback_full", content=content,
-                metadata={**metadata, 'type': 'fallback_full', 'source': '3gpp'},
+                id=f"{spec_id}_{section_id.replace('.', '_')}",
+                content=chunk_content,
+                metadata={**metadata, 'section_id': section_id, 'title': section_title,
+                          'type': '3gpp_section', 'parent_section_id': section_id},
                 source_type='3gpp'
             )]
 
+        paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+        chunks = []
+        current = ""
+        sub_id = 0
 
-class GenericChunker(BaseChunker):
-    """通用 Chunker：处理 case / community / product_doc / default 类型"""
+        for para in paragraphs:
+            if para.startswith(('Note:', 'Important:', 'Caution:', 'Example:', 'Warning:')):
+                if current.strip():
+                    chunks.append(Chunk(
+                        id=f"{spec_id}_{section_id.replace('.', '_')}_sub_{sub_id}",
+                        content=f"### {section_title} ({section_id})\n\n{current.strip()}",
+                        metadata={**metadata, 'section_id': section_id,
+                                  'sub_section_id': f"{section_id}_sub_{sub_id}",
+                                  'title': section_title, 'type': '3gpp_subsection',
+                                  'parent_section_id': section_id},
+                        source_type='3gpp'
+                    ))
+                    sub_id += 1
+                    current = ""
+                current = para
+            elif current and len(current) + len(para) + 2 > 1000:
+                chunks.append(Chunk(
+                    id=f"{spec_id}_{section_id.replace('.', '_')}_sub_{sub_id}",
+                    content=f"### {section_title} ({section_id})\n\n{current.strip()}",
+                    metadata={**metadata, 'section_id': section_id,
+                              'sub_section_id': f"{section_id}_sub_{sub_id}",
+                              'title': section_title, 'type': '3gpp_subsection',
+                              'parent_section_id': section_id},
+                    source_type='3gpp'
+                ))
+                sub_id += 1
+                current = para
+            else:
+                current = current + "\n\n" + para if current else para
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.chunk_size = kwargs.get('chunk_size', 500)
-        self.overlap = kwargs.get('overlap', 50)
+        if current.strip():
+            chunks.append(Chunk(
+                id=f"{spec_id}_{section_id.replace('.', '_')}_sub_{sub_id}",
+                content=f"### {section_title} ({section_id})\n\n{current.strip()}",
+                metadata={**metadata, 'section_id': section_id,
+                          'sub_section_id': f"{section_id}_sub_{sub_id}",
+                          'title': section_title, 'type': '3gpp_subsection',
+                          'parent_section_id': section_id},
+                source_type='3gpp'
+            ))
+
+        return chunks if chunks else [Chunk(
+            id=f"{spec_id}_{section_id}",
+            content=content,
+            metadata={**metadata, 'section_id': section_id, 'title': section_title,
+                      'type': '3gpp_section', 'parent_section_id': section_id},
+            source_type='3gpp'
+        )]
+
+
+# ==================== Product Chunker ====================
+
+class ProductChunker(BaseChunker):
+    """产品文档 Chunker：按 ## 二级标题切分"""
 
     def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
-        from document_loader import chunk_text, is_meaningless_chunk, clean_chunk_text
-        doc_type = metadata.get('type', 'default')
-
-        # 按 ## 二级标题切分
         parts = re.split(r'(?=^## )', content, flags=re.MULTILINE)
-        if len(parts) <= 1:
-            # 无标题结构，直接用滑动窗口
-            text_chunks = chunk_text(content, chunk_size=self.chunk_size, overlap=self.overlap)
-        else:
-            text_chunks = []
-            for p in parts:
-                p = p.strip()
-                if len(p) < 30:
-                    continue
-                if len(p) > 600:
-                    subs = chunk_text(p, chunk_size=self.chunk_size, overlap=self.overlap)
-                    text_chunks.extend(subs)
-                else:
-                    text_chunks.append(p)
-
-        # 清洗 + 过滤
-        cleaned = []
-        for c in text_chunks:
-            if is_meaningless_chunk(c, metadata):
+        chunks = []
+        for i, p in enumerate(parts):
+            p = p.strip()
+            if len(p) < 30:
                 continue
-            c = clean_chunk_text(c)
-            if c:
-                cleaned.append(c)
+            # 提取标题
+            title_match = re.match(r'^##\s+(.+)', p)
+            section_title = title_match.group(1).strip() if title_match else f"section_{i}"
+            chunks.append(Chunk(
+                id=f"product_chunk_{i}",
+                content=p,
+                metadata={**metadata, 'section_title': section_title, 'type': 'product_doc',
+                          'parent_section_id': f"product_chunk_{i}"},
+                source_type='product_doc'
+            ))
+        return chunks if chunks else [Chunk(
+            id="product_full", content=content,
+            metadata={**metadata, 'type': 'product_doc', 'parent_section_id': 'product_full'},
+            source_type='product_doc'
+        )]
 
-        if not cleaned and text_chunks:
-            fallback = clean_chunk_text(text_chunks[0])
-            cleaned = [fallback] if fallback else []
 
-        return [Chunk(id=f"chunk_{i}", content=t, metadata={**metadata, 'type': doc_type, 'chunk_index': i}, source_type=doc_type)
-                for i, t in enumerate(cleaned)]
+# ==================== Case Chunker ====================
 
+class CaseChunker(BaseChunker):
+    """案例文档 Chunker：按 ## 现象/原因/解决方案/排查过程 关键词切分"""
+
+    CASE_SECTIONS = ['现象', '原因', '解决方案', '解决方法', '排查过程', '排障过程', '根因', '处理步骤']
+
+    def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        parts = re.split(r'(?=^## )', content, flags=re.MULTILINE)
+        chunks = []
+        for i, p in enumerate(parts):
+            p = p.strip()
+            if len(p) < 30:
+                continue
+            title_match = re.match(r'^##\s+(.+)', p)
+            section_title = title_match.group(1).strip() if title_match else f"section_{i}"
+            chunks.append(Chunk(
+                id=f"case_chunk_{i}",
+                content=p,
+                metadata={**metadata, 'section_title': section_title, 'type': 'case',
+                          'parent_section_id': f"case_chunk_{i}"},
+                source_type='case'
+            ))
+        return chunks if chunks else [Chunk(
+            id="case_full", content=content,
+            metadata={**metadata, 'type': 'case', 'parent_section_id': 'case_full'},
+            source_type='case'
+        )]
+
+
+# ==================== Generic Chunker ====================
+
+class GenericChunker(BaseChunker):
+    """通用 Chunker：短文本整体返回，长文本按段落切分"""
+
+    def chunk(self, content: str, metadata: Dict[str, Any]) -> List[Chunk]:
+        doc_type = metadata.get('type', 'default')
+        if len(content) <= 1000:
+            return [Chunk(
+                id="chunk_0", content=content,
+                metadata={**metadata, 'type': doc_type, 'parent_section_id': 'chunk_0'},
+                source_type=doc_type
+            )]
+
+        paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+        chunks = []
+        current = ""
+        sub_id = 0
+        for para in paragraphs:
+            if current and len(current) + len(para) + 2 > 700:
+                chunks.append(Chunk(
+                    id=f"chunk_{sub_id}", content=current.strip(),
+                    metadata={**metadata, 'type': doc_type, 'parent_section_id': f"chunk_{sub_id}"},
+                    source_type=doc_type
+                ))
+                sub_id += 1
+                current = para
+            else:
+                current = current + "\n\n" + para if current else para
+        if current.strip():
+            chunks.append(Chunk(
+                id=f"chunk_{sub_id}", content=current.strip(),
+                metadata={**metadata, 'type': doc_type, 'parent_section_id': f"chunk_{sub_id}"},
+                source_type=doc_type
+            ))
+        return chunks if chunks else [Chunk(
+            id="chunk_0", content=content,
+            metadata={**metadata, 'type': doc_type, 'parent_section_id': 'chunk_0'},
+            source_type=doc_type
+        )]
+
+
+# ==================== 分发器 ====================
 
 def get_chunker(doc_type: str, **kwargs) -> BaseChunker:
     """根据文档类型返回对应的 Chunker 实例"""
     if doc_type == 'rfc':
-        return RFCChunker(**kwargs)
+        return RFCChunker()
     elif doc_type == '3gpp':
-        return GPPChunker(**kwargs)
+        return GPPChunker()
+    elif doc_type == 'product_doc':
+        return ProductChunker()
+    elif doc_type in ('case', 'community'):
+        return CaseChunker()
     else:
-        return GenericChunker(**kwargs)
-
-
-# 测试函数，可直接运行
-def test_rfc_chunker():
-    """测试RFC chunker"""
-    test_content = """1. Introduction
-
-This document defines the Session Initiation Protocol (SIP) for initiating, modifying, and terminating sessions between two or more participants in a multimedia conference, including voice, video, and messaging.
-
-2. Conformance
-
-The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
-
-21.4.2 401 Unauthorized
-
-The 401 response indicates that the request requires user authentication. The response MUST include a WWW-Authenticate header field containing a challenge applicable to the requested resource.
-
-403 Forbidden
-
-The 403 response indicates that the server understood the request but refuses to fulfill it. The server SHOULD include a message body that explains why the request was refused.
-
-4. Protocol Overview
-
-The SIP protocol is a text-based protocol for session establishment."""
-
-    meta = {'title': 'RFC3261', 'type': 'rfc', 'version': '1.0'}
-
-    print("测试RFC Charmer:")
-    chunker = RFCChunker()
-    chunks = chunker.chunk(test_content, meta)
-
-    print(f"生成 {len(chunks)} 个chunks")
-    for i, chunk in enumerate(chunks):
-        print(f"Chunk {i+1}: {chunk.id}")
-        print(f"  内容长度: {len(chunk.content)}")
-        print(f"  内容预览: {chunk.content[:100]}...")
-        print(f"  元数据: {chunk.metadata}")
-        print()
-
-    return chunks
-
-def test_3gpp_chunker():
-    """测试3GPP chunker"""
-    test_content = """1. Introduction
-
-This is the introduction section of a 3GPP specification document. It describes the overall purpose and scope of the specification.
-
-2. Conformance
-
-The terms "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119.
-
-3. Architecture
-
-The architecture of the 3GPP system consists of several components including:
-- Core Network Elements
-- User Equipment (UE)
-- Access Network Elements
-
-Note: The architecture may vary depending on the specific 3GPP release and deployment scenario.
-
-3.1. Network Components
-
-The 3GPP network components include the following:
-- MME (Mobility Management Entity)
-- S-GW (Serving Gateway)
-- P-GW (Packet Data Network Gateway)
-
-Important: The exact implementation of these components is defined in the relevant 3GPP technical specifications.
-
-4. Protocol Description
-
-This section describes the protocols used in the 3GPP system."""
-
-    meta = {'title': 'TS 29.212', 'type': '3gpp', 'version': '1.0'}
-
-    print("测试3GPP Chunker:")
-    chunker = GPPChunker()
-    chunks = chunker.chunk(test_content, meta)
-
-    print(f"生成 {len(chunks)} 个chunks")
-    for i, chunk in enumerate(chunks):
-        print(f"Chunk {i+1}: {chunk.id}")
-        print(f"  内容长度: {len(chunk.content)}")
-        print(f"  内容预览: {chunk.content[:150]}...")
-        print(f"  元数据: {chunk.metadata}")
-        print()
-
-if __name__ == "__main__":
-    test_rfc_chunker()
-    test_3gpp_chunker()
+        return GenericChunker()

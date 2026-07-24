@@ -1,13 +1,14 @@
+"""文档加载与解析。数据清洗函数供 rfc_loader / 3gpp_pdf_loader 在 .md 转换阶段调用。"""
+
 import os
 import re
 import yaml
 import logging
 from typing import List
 from dataclasses import dataclass
-from chunker import RFCChunker
 
 
-# ==================== 数据清洗相关常量和函数 ====================
+# ==================== 数据清洗（供 parse 阶段使用） ====================
 
 MEANINGLESS_SECTIONS = {
     'acknowledgements', 'authors', 'author', 'appendix',
@@ -17,12 +18,8 @@ MEANINGLESS_SECTIONS = {
 }
 
 _MIN_CHUNK_LENGTHS = {
-    'case': 40,
-    'rfc': 80,
-    '3gpp': 80,
-    'product_doc': 60,
-    'community': 50,
-    'default': 80,
+    'case': 40, 'rfc': 80, '3gpp': 80,
+    'product_doc': 60, 'community': 50, 'default': 80,
 }
 
 _NOISE_PATTERNS = [
@@ -37,6 +34,7 @@ _NOISE_PATTERNS = [
 
 
 def is_meaningless_chunk(text: str, meta: dict) -> bool:
+    """判断文本块是否无意义（供 parse 阶段过滤噪音）"""
     if not text or not text.strip():
         return True
     text_stripped = text.strip()
@@ -50,14 +48,14 @@ def is_meaningless_chunk(text: str, meta: dict) -> bool:
     for pattern, _ in _NOISE_PATTERNS:
         if re.search(pattern, text_stripped):
             return True
-    alpha_digit_count = sum(c.isalnum() for c in text_stripped)
-    alpha_ratio = alpha_digit_count / max(len(text_stripped), 1)
+    alpha_ratio = sum(c.isalnum() for c in text_stripped) / max(len(text_stripped), 1)
     if alpha_ratio < 0.15:
         return True
     return False
 
 
 def clean_chunk_text(text: str) -> str:
+    """清理文本残余噪音（供 parse 阶段使用）"""
     lines = text.splitlines()
     cleaned_lines = []
     for line in lines:
@@ -65,9 +63,10 @@ def clean_chunk_text(text: str) -> str:
         if stripped or len(cleaned_lines) == 0:
             cleaned_lines.append(line.rstrip())
     result = '\n'.join(cleaned_lines)
-    result = re.sub(r'\n{3,}', '\n\n', result)
-    return result.strip()
+    return re.sub(r'\n{3,}', '\n\n', result).strip()
 
+
+# ==================== 文档加载 ====================
 
 @dataclass
 class RawDocument:
@@ -76,6 +75,7 @@ class RawDocument:
 
 
 def parse_markdown_with_yaml(file_path: str) -> RawDocument:
+    """解析 .md 文件：提取 YAML 头部元数据 + 正文"""
     with open(file_path, "r", encoding="utf-8") as f:
         text = f.read()
     match = re.match(r'^---\s*\n(.*?)\n---\s*\n', text, re.DOTALL)
@@ -88,33 +88,8 @@ def parse_markdown_with_yaml(file_path: str) -> RawDocument:
     return RawDocument(meta=meta, content=content)
 
 
-def chunk_text(text: str, chunk_size=300, overlap=50) -> List[str]:
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        chunk = text[start:end]
-        chunks.append(chunk)
-        start += (chunk_size - overlap)
-    return chunks
-
-
-def semantic_chunk(text: str, meta: dict) -> List:
-    """
-    根据文档类型选择切分策略。委托给 chunker.py 的 get_chunker() 分发。
-    meta['type']: 'rfc' → RFCChunker / '3gpp' → GPPChunker / 其他 → GenericChunker。
-    """
-    from chunker import get_chunker, GenericChunker
-    doc_type = meta.get("type", "default")
-    try:
-        chunker = get_chunker(doc_type)
-        return chunker.chunk(text, meta)
-    except Exception:
-        logging.exception(f"Chunker ({doc_type}) 失败，回退到 GenericChunker")
-        return GenericChunker().chunk(text, meta)
-
-
 def load_all_md_documents(dir_path: str) -> List[RawDocument]:
+    """递归加载目录下所有 .md 文件"""
     docs = []
     for root, _, files in os.walk(dir_path):
         for file in files:

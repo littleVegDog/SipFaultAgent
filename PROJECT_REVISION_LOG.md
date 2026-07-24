@@ -1,5 +1,45 @@
 # 项目修订记录
 
+## 2026-07-24 — 完整 Chunker 重构 (10项计划)
+
+### 背景
+按用户修改计划，系统性重构 chunker 架构：数据清洗前移到 parse 阶段，chunk 只做切分。
+
+### 修改
+
+| # | 文件 | 改动 |
+|---|------|------|
+| 1 | `chunker.py` | RFCChunker 重写：删除 `_extract_sections()`，直接用 `metadata` 中的 `section_id`/`section_title`；短章节整体返回，长章节按段落分子块；全部带 `parent_section_id` |
+| 2 | `chunker.py` | GPPChunker 重写：同上模式 |
+| 3 | `chunker.py` | GenericChunker：短文本整体返回，长文本按段落切分，无数据清洗 |
+| 4 | `chunker.py` | **新增** ProductChunker（`##` 标题切分）+ CaseChunker（`## 现象/原因/方案` 关键词切分）|
+| 5 | `rag.py` | `build_knowledge_base` + `build_knowledge_base_enhanced` + `incremental_add` 统一用 `get_chunker()` 直接分发，废弃 `semantic_chunk()` |
+| 6 | `rag.py` | `SbcRAG.load()` 自动调用 `reload_documents()` 填充 `self.documents`（Parent-Child 可用）|
+| 7 | `rag.py` | 元数据平铺：`_flatten_meta()` 展开 meta 字段到 Chroma metadata 顶层；`_parse_meta()` 还原；`filter_meta` 查询生效 |
+| 8 | `document_loader.py` | 精简为 parse/load 核心：`parse_markdown_with_yaml()` + `load_all_md_documents()` + 数据清洗函数（`is_meaningless_chunk`/`clean_chunk_text` 供 parse 阶段使用）。删除 `chunk_text`/`semantic_chunk`/`_semantic_chunk_old`/`extract_sections`/`_wrap_as_chunks`/`_post_process_chunks` |
+| 9 | `tests/` | 更新 `test_document_loader.py` 适配新 API，删除 `TestChunkText`/`TestSemanticChunk` |
+
+### 新架构
+
+```
+get_chunker(doc_type)            document_loader.py (parse only)
+  ├── 'rfc' → RFCChunker          ├── parse_markdown_with_yaml()
+  ├── '3gpp' → GPPChunker         ├── load_all_md_documents()
+  ├── 'product_doc' → ProductChunker  ├── is_meaningless_chunk() [parse阶段]
+  ├── 'case' → CaseChunker        └── clean_chunk_text()     [parse阶段]
+  └── default → GenericChunker
+```
+
+### 数据清洗职责
+
+**前移到 parse 阶段**（rfc_loader/3gpp_pdf_loader 转 .md 时调用）：
+- `is_meaningless_chunk()` — 过滤噪音
+- `clean_chunk_text()` — 清理残余格式
+
+**Chunker 不再做清洗，只做切分。**
+
+---
+
 ## 2026-07-24 — Issue #3: 重构 Chunker 架构
 
 ### 背景
